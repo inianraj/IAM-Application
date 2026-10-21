@@ -1,0 +1,4 @@
+@"
+.env
+*.exe
+"@ | Out-File -Encoding utf8 .gitignore
