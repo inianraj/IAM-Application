@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A JSON CRUD API over a single PostgreSQL table (`records`), written in Go (module name `crud`, Go 1.27) using only the standard library's `net/http` router plus the `pgx` driver via `database/sql`. There is no git repo, no tests, no Makefile, and no linter config yet.
+A JSON CRUD API over PostgreSQL (`records`, `organisations`, plus `users` / `groups`), written in Go (module name `crud`, Go 1.27) using only the standard library's `net/http` router plus the `pgx` driver via `database/sql`. There is no git repo, no tests, no Makefile, and no linter config yet.
 
 ## Commands
 
@@ -15,23 +15,68 @@ go build ./...                # build
 go vet ./...                  # static checks
 go test ./...                 # run tests (none exist yet)
 go test ./internal/service -run TestName   # single test, once tests exist
+swag init -g cmd/api/main.go -o docs --parseInternal   # regenerate Swagger docs (swag CLI v1.16.4)
 ```
 
-Migrations are plain SQL in [migrations/](migrations/) with no runner — the app does not create the schema. Apply them manually, e.g.:
+Swagger UI is served at http://localhost:8080/swagger/index.html.
+
+Migrations are plain SQL in [migrations/](migrations/) with no runner — the app does not create the schema. Apply each file in order manually, e.g.:
 
 ```powershell
-Get-Content migrations/001_create_records.sql | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>
+Get-Content migrations/001_create_records.sql     | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>
+Get-Content migrations/002_create_users_groups.sql | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>
+Get-Content migrations/003_create_organisations.sql | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>
+Get-Content migrations/004_groups_belong_to_organisation.sql | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>   # deletes org-less groups; see the file header
+Get-Content migrations/005_users_organisation.sql | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>
+Get-Content migrations/006_drop_users_password.sql | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>   # drops users.password_hash
+Get-Content migrations/007_records_user.sql | docker exec -i crud-api-postgres psql -U <DB_USER> -d <DB_NAME>   # records.user_id NOT NULL; existing records go to the lowest-id user
 ```
 
 ## Architecture
 
-Layered, wired by hand in [cmd/api/main.go](cmd/api/main.go): `database.Open` → repository → service → handler → `http.ServeMux` routes under `/api/v1/records` (Go 1.22+ method/path patterns, `r.PathValue("id")`). The server shuts down gracefully on SIGINT/SIGTERM.
+Layered, wired by hand in [cmd/api/main.go](cmd/api/main.go): `database.Open` → repository → service → handler, then `router.New` builds the `http.ServeMux` (Go 1.22+ method/path patterns, `r.PathValue("id")`). The server shuts down gracefully on SIGINT/SIGTERM.
+
+- **Routes** — each handler declares its own routes in a `Register(mux)` method (e.g. `RecordHandler.Register` in [record_handler.go](internal/handler/record_handler.go)), next to the `@Router` annotations they must match. [internal/router/router.go](internal/router/router.go) calls every `Register` and adds `/swagger/`; it also returns the final `http.Handler`, so shared middleware wraps it there. A new handler needs three edits: its `Register`, a field in `router.Handlers`, and construction in `main.go`.
 
 - **domain** — the entity is `domain.Task`, but it is stored in the `records` table and exposed as "record" in URLs and error messages. `Task.Validate()` trims fields *in place* (pointer receiver) and enforces a non-empty title of ≤200 chars, matching `VARCHAR(200)` in the migration. Sentinel errors live in [internal/domain/errors.go](internal/domain/errors.go).
-- **repository** — raw SQL with `$n` placeholders. `scanTask` maps `sql.ErrNoRows` → `domain.ErrTaskNotFound`; `Delete` uses `RowsAffected` to do the same. `List` returns an empty slice (never nil) so the JSON is `[]`.
+- **repository** — raw SQL with `$n` placeholders. `scanTask` maps `sql.ErrNoRows` → `domain.ErrTaskNotFound`; `Delete` uses `RowsAffected` to do the same. `ListByUser` returns an empty slice (never nil) so the JSON is `[]`.
 - **service** — depends on the `TaskStore` interface (not the concrete repository), validates IDs and entities, then delegates.
-- **handler** — `decodeJSON` enforces a 1 MiB body limit, rejects unknown fields and trailing JSON values. `writeServiceError` maps sentinel errors to HTTP status (invalid → 400, not found → 404, everything else → generic 500 so DB details don't leak). New domain errors need a case here.
+- **handler** — `decodeJSON` enforces a 1 MiB body limit, rejects unknown fields and trailing JSON values. `writeServiceError` maps sentinel errors to HTTP status (invalid → 400, not found → 404, email/group already exists → 409, everything else → generic 500 so DB details don't leak). New domain errors need a case here.
 - **util** — `JSON` / `Error` response helpers; errors are always `{"error": "..."}`.
+- **docs/** (repo root) — generated by swaggo from the `// @...` annotations on `main()` and on each handler method; never edit by hand. Re-run `swag init` after changing routes, annotations, request structs, `domain.Task` / `domain.User` / `domain.Group`, or error responses, and commit the result. `--parseInternal` is required because the annotated types live under `internal/`. Keep the `github.com/swaggo/swag` version in `go.mod` matching the CLI version, or the generated `docs.go` may not compile.
+
+### Users and groups
+
+There is no login, session or auth middleware yet; these endpoints are public.
+
+- **There is no password, login or session**, and no "create user" endpoint other than signup. `POST /api/v1/auth/signup` `{name,email,organisation_id}` → 201 `{"message":"signup successful","user_id":N}`; 404 if the organisation doesn't exist (or has no `admin` group); 409 if the email exists (the `users.email` UNIQUE constraint, with the email lower-cased, is the source of truth).
+- **Groups CRUD** — `POST /api/v1/groups` `{organisation_id,name}` → 201 `{id,organisation_id,name}`; `GET /api/v1/groups?organisation_id=N` (the parameter is **required**: only that organisation's groups are listed; 400 if missing/invalid, 404 if the organisation doesn't exist, `[]` if it has no groups); `GET/PUT/DELETE /api/v1/groups/{id}` (PUT takes `{organisation_id,name}`, both required, so it can move a group to another org). Errors: 400 invalid/missing `organisation_id` or name, 404 unknown group or organisation, 409 name already used **in that organisation**. `DELETE` returns 204, or 409 `group still has users` (the `users.group_id` FK violation maps to `ErrGroupInUse`).
+- Group names are lower-cased, must match `^[a-z][a-z0-9_-]*$`, and are unique **per organisation** (`UNIQUE (organisation_id, name)`), so the same name can exist in several organisations. `organisation_id` is `NOT NULL`, with no default.
+- `GET /api/v1/groups/{id}/users` → 200 `[{name,email}, ...]` (oldest user first; `[]` for an empty group); 404 if the group doesn't exist. It takes the group **id**, not the name, because names are no longer globally unique. One `LEFT JOIN` query tells an empty group apart from a missing one.
+- **Other user endpoints** — `GET /api/v1/users/{id}` → 200 user. `PUT /api/v1/users/{id}` `{name,email}` → 200 user (same work-email rules; the group is never changed here). `DELETE /api/v1/users/{id}` → 204, or 409 `user still has records` (the `records.user_id` FK violation maps to `ErrUserInUse`; delete the user's records first). Unknown user → 404, email taken → 409. There is no list-users endpoint. The user JSON is `{id,name,email,group_id,organisation_id,created_at,updated_at}`.
+- `users.organisation_id` is stored (migration 005), and a composite foreign key `users (group_id, organisation_id) → groups (id, organisation_id)` makes the **database** guarantee a user's group belongs to the user's organisation. A user stays in one organisation for life (update never changes it). The repository's checks exist to give the right error; the FK is the safety net.
+- `PUT /api/v1/users/{id}/group` `{group_id}` → 200 `{user_id,group_id}`. **The group must belong to the organisation stored on the user**: 400 `group does not belong to the user's organisation` otherwise; 404 for an unknown user or group. `UserRepository.Create` and `AssignGroup` do the check and the write in one SQL statement; only when it affects zero rows do they run a second query, to pick the right error.
+- Because of that FK: a group that has users can't be moved to another organisation (`PUT /groups/{id}` → 409 `group still has users`, mapped in `scanGroup` by constraint name; a missing target organisation is still 404), and deleting a group or organisation that has users is 409.
+- Validation is regex-based in [internal/domain/user_validation.go](internal/domain/user_validation.go): email shape and a blocklist of personal-provider domain patterns (gmail, yahoo.*, hotmail.*, ... — add patterns there).
+- Every signup is put in the `admin` group **of the organisation named in the request** by design (`domain.DefaultGroupName` in [internal/domain/group.go](internal/domain/group.go)). That group is created automatically with every organisation (see Organisations).
+- Layers mirror the records code: `UserHandler` / `GroupHandler` → `UserService` / `GroupService` (`UserStore` / `GroupStore` interfaces) → `UserRepository` / `GroupRepository`. `handler.parsePathID` takes the error message; `parseID` is the "record" variant.
+
+### Records belong to a user
+
+`records.user_id` is `NOT NULL` and references `users(id)` (migration 007; the one existing record was given to the lowest-id user).
+
+- `POST /api/v1/records` `{user_id,title[,description]}` → 201 record (now includes `user_id`); 400 if `user_id` is missing/≤0, 404 `user not found` if the user doesn't exist (the FK violation maps to `ErrUserNotFound` in `scanTask`).
+- `GET /api/v1/records?user_id=N` — the parameter is **required** and only that user's records are returned (400 if missing/invalid, 404 if the user doesn't exist, `[]` if they have none). The repository uses one `LEFT JOIN` query, like the groups listing, to tell an empty list from a missing user. There is no "list all records" any more.
+- `GET`/`PUT`/`DELETE /api/v1/records/{id}` are unchanged. `PUT` takes only `{title,description}` (`recordRequest`); the owner can't be changed, and a `user_id` in the body is rejected as an unknown field. Create uses a separate `createRecordRequest`.
+
+### Organisations
+
+A standalone CRUD (public, like the rest) over the `organisations` table (`id`, `name`): `POST/GET /api/v1/organisations`, `GET/PUT/DELETE /api/v1/organisations/{id}`. Delete returns 204; unknown id → 404; duplicate name → 409.
+
+- Names are trimmed, required, ≤100 characters, and unique **ignoring case** via a unique index on `LOWER(name)` (the stored name keeps the case given). Updating an org to its own name in a different case is allowed.
+- The repository maps both `sql.ErrNoRows` (→ `ErrOrganisationNotFound`) and unique violations (→ `ErrOrganisationExists`) inside `scanOrganisation`, so `Create`/`Update` get the 409 for free. The unique-violation check reuses `pgCode` / `uniqueViolation` from `user_repository.go`.
+- **Every organisation gets an `admin` group**: `OrganisationRepository.Create` inserts the org and its `admin` group in one transaction.
+- **Delete** removes the organisation's groups too (`groups.organisation_id` is `ON DELETE CASCADE`), and returns 409 `ErrOrganisationInUse` if any of them still has users (the `users.group_id` FK blocks it). So an organisation with no users can be deleted directly, without deleting its groups first.
 
 ### Configuration quirks
 

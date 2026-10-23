@@ -9,7 +9,7 @@ import (
 type TaskStore interface {
 	Create(ctx context.Context, t domain.Task) (domain.Task, error)
 	GetByID(ctx context.Context, id int64) (domain.Task, error)
-	List(ctx context.Context) ([]domain.Task, error)
+	ListByUser(ctx context.Context, userID int64) ([]domain.Task, error)
 	Update(ctx context.Context, t domain.Task) (domain.Task, error)
 	Delete(ctx context.Context, id int64) error
 }
@@ -30,6 +30,9 @@ func checkID(id int64) error {
 }
 
 func (s *TaskService) Create(ctx context.Context, t domain.Task) (domain.Task, error) {
+	if t.UserID <= 0 {
+		return domain.Task{}, domain.ErrInvalidUserID
+	}
 	if err := t.Validate(); err != nil {
 		return domain.Task{}, err
 	}
@@ -43,8 +46,11 @@ func (s *TaskService) Get(ctx context.Context, id int64) (domain.Task, error) {
 	return s.store.GetByID(ctx, id)
 }
 
-func (s *TaskService) List(ctx context.Context) ([]domain.Task, error) {
-	return s.store.List(ctx)
+func (s *TaskService) ListByUser(ctx context.Context, userID int64) ([]domain.Task, error) {
+	if userID <= 0 {
+		return nil, domain.ErrInvalidUserID
+	}
+	return s.store.ListByUser(ctx, userID)
 }
 
 func (s *TaskService) Update(ctx context.Context, t domain.Task) (domain.Task, error) {

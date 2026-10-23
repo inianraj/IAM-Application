@@ -1,0 +1,860 @@
+basePath: /api/v1
+definitions:
+  domain.Group:
+    properties:
+      id:
+        type: integer
+      name:
+        type: string
+      organisation_id:
+        type: integer
+    type: object
+  domain.GroupMember:
+    properties:
+      email:
+        type: string
+      name:
+        type: string
+    type: object
+  domain.Organisation:
+    properties:
+      id:
+        type: integer
+      name:
+        type: string
+    type: object
+  domain.Task:
+    properties:
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: integer
+      title:
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        type: integer
+    type: object
+  domain.User:
+    properties:
+      created_at:
+        type: string
+      email:
+        type: string
+      group_id:
+        description: |-
+          GroupID is the user's group, which always belongs to OrganisationID (the
+          database enforces it with a composite foreign key).
+        type: integer
+      id:
+        type: integer
+      name:
+        type: string
+      organisation_id:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  handler.assignGroupRequest:
+    properties:
+      group_id:
+        example: 2
+        type: integer
+    type: object
+  handler.assignGroupResponse:
+    properties:
+      group_id:
+        example: 2
+        type: integer
+      user_id:
+        example: 1
+        type: integer
+    type: object
+  handler.createRecordRequest:
+    properties:
+      description:
+        type: string
+      title:
+        type: string
+      user_id:
+        example: 1
+        type: integer
+    type: object
+  handler.groupRequest:
+    properties:
+      name:
+        example: editors
+        type: string
+      organisation_id:
+        example: 1
+        type: integer
+    type: object
+  handler.organisationRequest:
+    properties:
+      name:
+        example: Acme Corp
+        type: string
+    type: object
+  handler.recordRequest:
+    properties:
+      description:
+        type: string
+      title:
+        type: string
+    type: object
+  handler.signupRequest:
+    properties:
+      email:
+        example: alice@company.com
+        type: string
+      name:
+        example: Alice
+        type: string
+      organisation_id:
+        example: 1
+        type: integer
+    type: object
+  handler.signupResponse:
+    properties:
+      message:
+        example: signup successful
+        type: string
+      user_id:
+        example: 1
+        type: integer
+    type: object
+  handler.updateUserRequest:
+    properties:
+      email:
+        example: alice@company.com
+        type: string
+      name:
+        example: Alice
+        type: string
+    type: object
+  util.ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: CRUD API for records stored in PostgreSQL.
+  title: Records CRUD API
+  version: "1.0"
+paths:
+  /auth/signup:
+    post:
+      consumes:
+      - application/json
+      description: Creates the user in the "admin" group of the given organisation
+        (404 if the organisation doesn't exist). Personal email providers (gmail,
+        yahoo, ...) are rejected.
+      parameters:
+      - description: Signup details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.signupRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.signupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Sign up with a work email
+      tags:
+      - users
+  /groups:
+    get:
+      description: Returns only the groups in the given organisation (an empty list
+        if it has none).
+      parameters:
+      - description: Organisation ID
+        in: query
+        name: organisation_id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Group'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List the groups of an organisation
+      tags:
+      - groups
+    post:
+      consumes:
+      - application/json
+      description: Returns the new group, including its ID. Names are lower-cased,
+        must start with a letter, and are unique within the organisation.
+      parameters:
+      - description: Group to create
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.groupRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/domain.Group'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Create a group in an organisation
+      tags:
+      - groups
+  /groups/{id}:
+    delete:
+      description: Fails with 409 while the group still has users; move them with
+        the assign-group endpoint first.
+      parameters:
+      - description: Group ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Delete a group
+      tags:
+      - groups
+    get:
+      parameters:
+      - description: Group ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Group'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Get a group by ID
+      tags:
+      - groups
+    put:
+      consumes:
+      - application/json
+      description: Sets the group's organisation and name (both required). The name
+        must be unique within the organisation. A group that has users cannot be moved
+        to another organisation (409).
+      parameters:
+      - description: Group ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New group details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.groupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Group'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Update a group
+      tags:
+      - groups
+  /groups/{id}/users:
+    get:
+      description: Returns the name and email of every user in the group (an empty
+        list if the group has no users).
+      parameters:
+      - description: Group ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.GroupMember'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List the users in a group
+      tags:
+      - groups
+  /organisations:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Organisation'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List all organisations
+      tags:
+      - organisations
+    post:
+      consumes:
+      - application/json
+      description: The name must be unique, ignoring case. An "admin" group is created
+        for the organisation automatically.
+      parameters:
+      - description: Organisation to create
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.organisationRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/domain.Organisation'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Create an organisation
+      tags:
+      - organisations
+  /organisations/{id}:
+    delete:
+      description: Also deletes the organisation's groups. Fails with 409 while any
+        of those groups still has users.
+      parameters:
+      - description: Organisation ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Delete an organisation
+      tags:
+      - organisations
+    get:
+      parameters:
+      - description: Organisation ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Organisation'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Get an organisation by ID
+      tags:
+      - organisations
+    put:
+      consumes:
+      - application/json
+      description: The new name must be unique, ignoring case.
+      parameters:
+      - description: Organisation ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New organisation details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.organisationRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Organisation'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Update an organisation
+      tags:
+      - organisations
+  /records:
+    get:
+      description: Returns only the records that belong to the given user (an empty
+        list if they have none).
+      parameters:
+      - description: User ID
+        in: query
+        name: user_id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Task'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List the records of a user
+      tags:
+      - records
+    post:
+      consumes:
+      - application/json
+      description: The record belongs to the user given by user_id (404 if the user
+        doesn't exist).
+      parameters:
+      - description: Record to create
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.createRecordRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/domain.Task'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Create a record for a user
+      tags:
+      - records
+  /records/{id}:
+    delete:
+      parameters:
+      - description: Record ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Delete a record
+      tags:
+      - records
+    get:
+      parameters:
+      - description: Record ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Task'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Get a record by ID
+      tags:
+      - records
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Record ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New title and description
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.recordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Task'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Update a record
+      tags:
+      - records
+  /users/{id}:
+    delete:
+      description: Fails with 409 while the user still has records; delete those first.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Delete a user
+      tags:
+      - users
+    get:
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Get a user by ID
+      tags:
+      - users
+    put:
+      consumes:
+      - application/json
+      description: Changes the name and email (work email only). The group is changed
+        with the assign-group endpoint.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New user details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.updateUserRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Update a user
+      tags:
+      - users
+  /users/{id}/group:
+    put:
+      consumes:
+      - application/json
+      description: The group must exist (404) and belong to the organisation stored
+        on the user (400 otherwise).
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Group to assign
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.assignGroupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.assignGroupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Assign a group to a user
+      tags:
+      - users
+swagger: "2.0"

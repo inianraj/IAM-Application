@@ -14,8 +14,6 @@ func JSON(w http.ResponseWriter, status int, data any) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		// The response may already have been sent.
-		// Log this in production; don't attempt a second response.
 		return
 	}
 }

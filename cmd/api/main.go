@@ -10,13 +10,19 @@ import (
 	"syscall"
 	"time"
 
+	_ "crud/docs"
 	"crud/internal/config"
 	"crud/internal/database"
 	"crud/internal/handler"
 	"crud/internal/repository"
+	"crud/internal/router"
 	"crud/internal/service"
 )
 
+// @title       Records CRUD API
+// @version     1.0
+// @description CRUD API for records stored in PostgreSQL.
+// @BasePath    /api/v1
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
@@ -43,18 +49,25 @@ func main() {
 	recordService := service.NewTaskService(recordRepo)
 	recordHandler := handler.NewRecordHandler(recordService)
 
-	// Register HTTP routes.
-	mux := http.NewServeMux()
+	userService := service.NewUserService(repository.NewUserRepository(db))
+	userHandler := handler.NewUserHandler(userService)
 
-	mux.HandleFunc("POST /api/v1/records", recordHandler.Create)
-	mux.HandleFunc("GET /api/v1/records", recordHandler.GetAll)
-	mux.HandleFunc("GET /api/v1/records/{id}", recordHandler.GetByID)
-	mux.HandleFunc("PUT /api/v1/records/{id}", recordHandler.Update)
-	mux.HandleFunc("DELETE /api/v1/records/{id}", recordHandler.Delete)
+	groupService := service.NewGroupService(repository.NewGroupRepository(db))
+	groupHandler := handler.NewGroupHandler(groupService)
+
+	organisationService := service.NewOrganisationService(repository.NewOrganisationRepository(db))
+	organisationHandler := handler.NewOrganisationHandler(organisationService)
+
+	routes := router.New(router.Handlers{
+		Records:       recordHandler,
+		Users:         userHandler,
+		Groups:        groupHandler,
+		Organisations: organisationHandler,
+	})
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           routes,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
