@@ -15,9 +15,9 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
-        "/auth/signup": {
+        "/auth/login": {
             "post": {
-                "description": "Creates the user in the \"admin\" group of the given organisation (404 if the organisation doesn't exist). Personal email providers (gmail, yahoo, ...) are rejected.",
+                "description": "There is no password: knowing the email of a user created with POST /auth/users is enough (development only, no proof of ownership). On success, sets an HttpOnly \"session\" cookie (SameSite=Strict) that the browser sends on later requests, and returns the user. Accounts can only sign in with the method they were created with (403 for google/github accounts). An unknown email returns 401. After 5 failed attempts per email and IP, 429 for 15 minutes.",
                 "consumes": [
                     "application/json"
                 ],
@@ -25,17 +25,107 @@ const docTemplate = `{
                     "application/json"
                 ],
                 "tags": [
-                    "users"
+                    "auth"
                 ],
-                "summary": "Sign up with a work email",
+                "summary": "Sign in with an email",
                 "parameters": [
                     {
-                        "description": "Signup details",
+                        "description": "Email",
                         "name": "body",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/handler.signupRequest"
+                            "$ref": "#/definitions/handler.loginRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.User"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/logout": {
+            "post": {
+                "description": "Ends the current session and clears the cookie. Requires a session.",
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Sign out",
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/organisations": {
+            "post": {
+                "description": "Needs no session. Creates the organisation (name unique, ignoring case) with an \"admin\" and a \"member\" group, and its first admin user from admin_name and admin_email, in one step: the email must not be registered yet (409), and nothing is created if any part fails. Personal email providers (gmail, yahoo, ...) are rejected. The admin signs in with POST /auth/login.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Create an organisation",
+                "parameters": [
+                    {
+                        "description": "Organisation and its admin",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.createOrganisationRequest"
                         }
                     }
                 ],
@@ -43,7 +133,59 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/handler.signupResponse"
+                            "$ref": "#/definitions/handler.organisationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/users": {
+            "post": {
+                "description": "Needs no session. organisation_id is required: the user gets the basic \"member\" role in that organisation (404 if it doesn't exist). Returns the created user. There is no password; the user signs in with POST /auth/login using the email. Personal email providers (gmail, yahoo, ...) are rejected.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Create a user",
+                "parameters": [
+                    {
+                        "description": "User details",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.createUserRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/domain.User"
                         }
                     },
                     "400": {
@@ -383,102 +525,16 @@ const docTemplate = `{
                 }
             }
         },
-        "/organisations": {
+        "/organisation": {
             "get": {
+                "description": "The organisation of the signed-in user; no id is needed. 404 for a user without an organisation. Requires a session.",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "organisations"
                 ],
-                "summary": "List all organisations",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/domain.Organisation"
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/util.ErrorResponse"
-                        }
-                    }
-                }
-            },
-            "post": {
-                "description": "The name must be unique, ignoring case. An \"admin\" group is created for the organisation automatically.",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "organisations"
-                ],
-                "summary": "Create an organisation",
-                "parameters": [
-                    {
-                        "description": "Organisation to create",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/handler.organisationRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "$ref": "#/definitions/domain.Organisation"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/util.ErrorResponse"
-                        }
-                    },
-                    "409": {
-                        "description": "Conflict",
-                        "schema": {
-                            "$ref": "#/definitions/util.ErrorResponse"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/util.ErrorResponse"
-                        }
-                    }
-                }
-            }
-        },
-        "/organisations/{id}": {
-            "get": {
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "organisations"
-                ],
-                "summary": "Get an organisation by ID",
-                "parameters": [
-                    {
-                        "type": "integer",
-                        "description": "Organisation ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
+                "summary": "Get my organisation",
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -486,8 +542,8 @@ const docTemplate = `{
                             "$ref": "#/definitions/domain.Organisation"
                         }
                     },
-                    "400": {
-                        "description": "Bad Request",
+                    "401": {
+                        "description": "Unauthorized",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
                         }
@@ -507,7 +563,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "The new name must be unique, ignoring case.",
+                "description": "Admins only (403 for members). The new name must be unique, ignoring case. Requires a session.",
                 "consumes": [
                     "application/json"
                 ],
@@ -517,15 +573,8 @@ const docTemplate = `{
                 "tags": [
                     "organisations"
                 ],
-                "summary": "Update an organisation",
+                "summary": "Rename my organisation",
                 "parameters": [
-                    {
-                        "type": "integer",
-                        "description": "Organisation ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
                     {
                         "description": "New organisation details",
                         "name": "body",
@@ -545,6 +594,18 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
                         }
@@ -570,18 +631,23 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Also deletes the organisation's groups. Fails with 409 while any of those groups still has users.",
+                "description": "Admins only (403 for members). PERMANENTLY deletes the organisation, its groups, all its users (the caller included) and all their records, in one transaction. confirm_name must be the organisation's exact name (400 otherwise). The users' sessions stop working immediately. Requires a session.",
+                "consumes": [
+                    "application/json"
+                ],
                 "tags": [
                     "organisations"
                 ],
-                "summary": "Delete an organisation",
+                "summary": "Delete my organisation",
                 "parameters": [
                     {
-                        "type": "integer",
-                        "description": "Organisation ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
+                        "description": "Confirmation",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.deleteOrganisationRequest"
+                        }
                     }
                 ],
                 "responses": {
@@ -590,6 +656,18 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
                         }
@@ -604,6 +682,34 @@ const docTemplate = `{
                         "description": "Conflict",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/organisations": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "organisations"
+                ],
+                "summary": "List all organisations",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Organisation"
+                            }
                         }
                     },
                     "500": {
@@ -1142,7 +1248,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "group_id": {
-                    "description": "GroupID is the user's group, which always belongs to OrganisationID (the\ndatabase enforces it with a composite foreign key).",
+                    "description": "GroupID is the user's group, which always belongs to OrganisationID (the\ndatabase enforces it with a composite foreign key). A user without an\norganisation has both as 0 (NULL in the database, omitted from JSON).",
                     "type": "integer"
                 },
                 "id": {
@@ -1153,6 +1259,11 @@ const docTemplate = `{
                 },
                 "organisation_id": {
                     "type": "integer"
+                },
+                "signup_method": {
+                    "description": "SignupMethod is how the user was created (SignupMethod* constants).",
+                    "type": "string",
+                    "example": "email"
                 },
                 "updated_at": {
                     "type": "string"
@@ -1181,6 +1292,23 @@ const docTemplate = `{
                 }
             }
         },
+        "handler.createOrganisationRequest": {
+            "type": "object",
+            "properties": {
+                "admin_email": {
+                    "type": "string",
+                    "example": "alice@company.com"
+                },
+                "admin_name": {
+                    "type": "string",
+                    "example": "Alice"
+                },
+                "name": {
+                    "type": "string",
+                    "example": "Acme Corp"
+                }
+            }
+        },
         "handler.createRecordRequest": {
             "type": "object",
             "properties": {
@@ -1196,40 +1324,7 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.groupRequest": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "example": "editors"
-                },
-                "organisation_id": {
-                    "type": "integer",
-                    "example": 1
-                }
-            }
-        },
-        "handler.organisationRequest": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "example": "Acme Corp"
-                }
-            }
-        },
-        "handler.recordRequest": {
-            "type": "object",
-            "properties": {
-                "description": {
-                    "type": "string"
-                },
-                "title": {
-                    "type": "string"
-                }
-            }
-        },
-        "handler.signupRequest": {
+        "handler.createUserRequest": {
             "type": "object",
             "properties": {
                 "email": {
@@ -1246,16 +1341,70 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.signupResponse": {
+        "handler.deleteOrganisationRequest": {
             "type": "object",
             "properties": {
-                "message": {
+                "confirm_name": {
                     "type": "string",
-                    "example": "signup successful"
+                    "example": "Acme Corp"
+                }
+            }
+        },
+        "handler.groupRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "example": "editors"
                 },
-                "user_id": {
+                "organisation_id": {
                     "type": "integer",
                     "example": 1
+                }
+            }
+        },
+        "handler.loginRequest": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "example": "alice@company.com"
+                }
+            }
+        },
+        "handler.organisationRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "example": "Acme Corp"
+                }
+            }
+        },
+        "handler.organisationResponse": {
+            "type": "object",
+            "properties": {
+                "admin": {
+                    "$ref": "#/definitions/domain.User"
+                },
+                "id": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "name": {
+                    "type": "string",
+                    "example": "Acme Corp"
+                }
+            }
+        },
+        "handler.recordRequest": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
                 }
             }
         },

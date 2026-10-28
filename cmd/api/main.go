@@ -11,12 +11,17 @@ import (
 	"time"
 
 	_ "crud/docs"
+	"crud/internal/auth"
+	"crud/internal/authz"
+	"crud/internal/cache"
 	"crud/internal/config"
 	"crud/internal/database"
+	"crud/internal/events"
 	"crud/internal/handler"
 	"crud/internal/repository"
 	"crud/internal/router"
 	"crud/internal/service"
+	"crud/internal/session"
 )
 
 // @title       Records CRUD API
@@ -45,24 +50,90 @@ func main() {
 
 	// Initialize application layers.
 
-	recordRepo := repository.NewTaskRepository(db)
-	recordService := service.NewTaskService(recordRepo)
-	recordHandler := handler.NewRecordHandler(recordService)
+	userRepo := repository.NewUserRepository(db)
+	groupRepo := repository.NewGroupRepository(db)
 
-	userService := service.NewUserService(repository.NewUserRepository(db))
+	var recordStore service.TaskStore = repository.NewTaskRepository(db)
+	var userStore service.UserStore = userRepo
+	var groupStore service.GroupStore = groupRepo
+	var organisationStore service.OrganisationStore = repository.NewOrganisationRepository(db)
+
+	// Redis is required: it holds the login sessions, and the API refuses to
+	// run without them. The same connection serves the read cache.
+	if cfg.RedisAddr == "" {
+		logger.Error("REDIS_ADDR is required for sessions")
+		os.Exit(1)
+	}
+
+	redisCtx, cancelRedis := context.WithTimeout(context.Background(), 5*time.Second)
+	rdb, err := cache.Open(redisCtx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	cancelRedis()
+
+	if err != nil {
+		logger.Error("redis initialization failed", "error", err)
+		os.Exit(1)
+	}
+	defer rdb.Close()
+
+	recordStore = cache.NewTaskStore(recordStore, rdb, cfg.CacheTTL, logger)
+	userStore = cache.NewUserStore(userStore, rdb, cfg.CacheTTL, logger)
+	groupStore = cache.NewGroupStore(groupStore, rdb, cfg.CacheTTL, logger)
+	organisationStore = cache.NewOrganisationStore(organisationStore, groupRepo, rdb, cfg.CacheTTL, logger)
+	logger.Info("redis enabled", "address", cfg.RedisAddr, "cache_ttl", cfg.CacheTTL, "session_ttl", cfg.SessionTTL)
+
+	// Events are optional: without RABBITMQ_URL, or if the broker is
+	// unreachable, signups still work but no welcome email is queued.
+	if cfg.RabbitMQURL != "" {
+		conn, err := events.Open(cfg.RabbitMQURL)
+		if err == nil {
+			defer conn.Close()
+
+			var pub *events.AMQPPublisher
+			pub, err = events.NewAMQPPublisher(conn)
+			if err == nil {
+				defer pub.Close()
+				userStore = events.NewUserStore(userStore, pub, logger)
+				logger.Info("rabbitmq events enabled")
+			}
+		}
+		if err != nil {
+			logger.Warn("rabbitmq unavailable, running without events", "error", err)
+		}
+	}
+
+	// Authentication and authorization read users and groups through the
+	// cached stores, so they always see current data.
+	authorizer := authz.New(userStore, groupStore)
+	sessions := session.NewRedisStore(rdb, cfg.SessionTTL)
+	cookie := auth.CookieConfig{Secure: cfg.CookieSecure, TTL: cfg.SessionTTL}
+
+	userService := service.NewUserService(userStore, authorizer)
 	userHandler := handler.NewUserHandler(userService)
 
-	groupService := service.NewGroupService(repository.NewGroupRepository(db))
-	groupHandler := handler.NewGroupHandler(groupService)
-
-	organisationService := service.NewOrganisationService(repository.NewOrganisationRepository(db))
+	organisationService := service.NewOrganisationService(organisationStore, authorizer)
 	organisationHandler := handler.NewOrganisationHandler(organisationService)
 
+	authService := service.NewAuthService(userRepo, sessions, session.NewLoginLimiter(rdb))
+	authHandler := handler.NewAuthHandler(authService, userService, organisationService, cookie)
+
+	recordService := service.NewTaskService(recordStore, authorizer)
+	recordHandler := handler.NewRecordHandler(recordService)
+
+	groupService := service.NewGroupService(groupStore, authorizer)
+	groupHandler := handler.NewGroupHandler(groupService)
+
+	authMiddleware := auth.NewMiddleware(sessions, userStore, cookie, router.PublicRoutes, logger)
+
 	routes := router.New(router.Handlers{
+		Auth:          authHandler,
 		Records:       recordHandler,
 		Users:         userHandler,
 		Groups:        groupHandler,
 		Organisations: organisationHandler,
+		Middleware: []func(http.Handler) http.Handler{
+			auth.OriginGuard(cfg.AllowedOrigins),
+			authMiddleware.Wrap,
+		},
 	})
 
 	server := &http.Server{

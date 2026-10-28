@@ -44,10 +44,29 @@ func scanGroup(row interface{ Scan(...any) error }) (domain.Group, error) {
 	return g, err
 }
 
-func (r *GroupRepository) Create(ctx context.Context, g domain.Group) (domain.Group, error) {
-	return scanGroup(r.db.QueryRowContext(ctx,
+// Create inserts the group together with its permissions, in one transaction.
+func (r *GroupRepository) Create(ctx context.Context, g domain.Group, permissions []string) (domain.Group, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Group{}, err
+	}
+	defer tx.Rollback() // no-op after Commit
+
+	created, err := scanGroup(tx.QueryRowContext(ctx,
 		`INSERT INTO groups (organisation_id, name) VALUES ($1, $2) RETURNING `+groupColumns,
 		g.OrganisationID, g.Name))
+	if err != nil {
+		return domain.Group{}, err
+	}
+
+	if err := insertGroupPermissions(ctx, tx, created.ID, permissions); err != nil {
+		return domain.Group{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return domain.Group{}, err
+	}
+	return created, nil
 }
 
 func (r *GroupRepository) GetByID(ctx context.Context, id int64) (domain.Group, error) {
@@ -149,7 +168,7 @@ func (r *GroupRepository) ListMembers(ctx context.Context, groupID int64) ([]dom
 	// LEFT JOIN so an empty group still yields one row (with NULL user
 	// columns), which tells it apart from a missing group.
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT u.name, u.email
+		`SELECT u.id, u.name, u.email
 		 FROM groups g LEFT JOIN users u ON u.group_id = g.id
 		 WHERE g.id = $1
 		 ORDER BY u.id`,
@@ -164,12 +183,13 @@ func (r *GroupRepository) ListMembers(ctx context.Context, groupID int64) ([]dom
 	for rows.Next() {
 		found = true
 
+		var id sql.NullInt64
 		var name, email sql.NullString
-		if err := rows.Scan(&name, &email); err != nil {
+		if err := rows.Scan(&id, &name, &email); err != nil {
 			return nil, err
 		}
-		if name.Valid {
-			members = append(members, domain.GroupMember{Name: name.String, Email: email.String})
+		if id.Valid {
+			members = append(members, domain.GroupMember{ID: id.Int64, Name: name.String, Email: email.String})
 		}
 	}
 	if err := rows.Err(); err != nil {

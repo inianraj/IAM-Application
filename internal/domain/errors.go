@@ -20,10 +20,19 @@ var (
 	ErrGroupInUse     = errors.New("group still has users")
 
 	ErrGroupNotInOrganisation = errors.New("group does not belong to the user's organisation")
+	ErrBuiltinGroup           = errors.New("built-in groups (admin, member) cannot be renamed, deleted or given other permissions")
 
 	ErrInvalidOrganisation   = errors.New("invalid organisation")
 	ErrInvalidOrganisationID = errors.New("invalid organisation ID")
 	ErrOrganisationNotFound  = errors.New("organisation not found")
 	ErrOrganisationExists    = errors.New("organisation already exists")
 	ErrOrganisationInUse     = errors.New("organisation still has groups with users")
+
+	// Authentication and authorization.
+	ErrInvalidCredentials = errors.New("invalid email")
+	ErrWrongSignupMethod  = errors.New("wrong sign-in method")
+	ErrTooManyAttempts    = errors.New("too many failed login attempts, try again later")
+	ErrUnauthenticated    = errors.New("authentication required")
+	ErrForbidden          = errors.New("forbidden")
+	ErrUnavailable        = errors.New("service temporarily unavailable")
 )

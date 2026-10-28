@@ -47,7 +47,8 @@ definitions:
       group_id:
         description: |-
           GroupID is the user's group, which always belongs to OrganisationID (the
-          database enforces it with a composite foreign key).
+          database enforces it with a composite foreign key). A user without an
+          organisation has both as 0 (NULL in the database, omitted from JSON).
         type: integer
       id:
         type: integer
@@ -55,6 +56,10 @@ definitions:
         type: string
       organisation_id:
         type: integer
+      signup_method:
+        description: SignupMethod is how the user was created (SignupMethod* constants).
+        example: email
+        type: string
       updated_at:
         type: string
     type: object
@@ -73,6 +78,18 @@ definitions:
         example: 1
         type: integer
     type: object
+  handler.createOrganisationRequest:
+    properties:
+      admin_email:
+        example: alice@company.com
+        type: string
+      admin_name:
+        example: Alice
+        type: string
+      name:
+        example: Acme Corp
+        type: string
+    type: object
   handler.createRecordRequest:
     properties:
       description:
@@ -83,29 +100,7 @@ definitions:
         example: 1
         type: integer
     type: object
-  handler.groupRequest:
-    properties:
-      name:
-        example: editors
-        type: string
-      organisation_id:
-        example: 1
-        type: integer
-    type: object
-  handler.organisationRequest:
-    properties:
-      name:
-        example: Acme Corp
-        type: string
-    type: object
-  handler.recordRequest:
-    properties:
-      description:
-        type: string
-      title:
-        type: string
-    type: object
-  handler.signupRequest:
+  handler.createUserRequest:
     properties:
       email:
         example: alice@company.com
@@ -117,14 +112,50 @@ definitions:
         example: 1
         type: integer
     type: object
-  handler.signupResponse:
+  handler.deleteOrganisationRequest:
     properties:
-      message:
-        example: signup successful
+      confirm_name:
+        example: Acme Corp
         type: string
-      user_id:
+    type: object
+  handler.groupRequest:
+    properties:
+      name:
+        example: editors
+        type: string
+      organisation_id:
         example: 1
         type: integer
+    type: object
+  handler.loginRequest:
+    properties:
+      email:
+        example: alice@company.com
+        type: string
+    type: object
+  handler.organisationRequest:
+    properties:
+      name:
+        example: Acme Corp
+        type: string
+    type: object
+  handler.organisationResponse:
+    properties:
+      admin:
+        $ref: '#/definitions/domain.User'
+      id:
+        example: 1
+        type: integer
+      name:
+        example: Acme Corp
+        type: string
+    type: object
+  handler.recordRequest:
+    properties:
+      description:
+        type: string
+      title:
+        type: string
     type: object
   handler.updateUserRequest:
     properties:
@@ -146,27 +177,130 @@ info:
   title: Records CRUD API
   version: "1.0"
 paths:
-  /auth/signup:
+  /auth/login:
     post:
       consumes:
       - application/json
-      description: Creates the user in the "admin" group of the given organisation
-        (404 if the organisation doesn't exist). Personal email providers (gmail,
-        yahoo, ...) are rejected.
+      description: 'There is no password: knowing the email of a user created with
+        POST /auth/users is enough (development only, no proof of ownership). On success,
+        sets an HttpOnly "session" cookie (SameSite=Strict) that the browser sends
+        on later requests, and returns the user. Accounts can only sign in with the
+        method they were created with (403 for google/github accounts). An unknown
+        email returns 401. After 5 failed attempts per email and IP, 429 for 15 minutes.'
       parameters:
-      - description: Signup details
+      - description: Email
         in: body
         name: body
         required: true
         schema:
-          $ref: '#/definitions/handler.signupRequest'
+          $ref: '#/definitions/handler.loginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Sign in with an email
+      tags:
+      - auth
+  /auth/logout:
+    post:
+      description: Ends the current session and clears the cookie. Requires a session.
+      responses:
+        "204":
+          description: No Content
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Sign out
+      tags:
+      - auth
+  /auth/organisations:
+    post:
+      consumes:
+      - application/json
+      description: 'Needs no session. Creates the organisation (name unique, ignoring
+        case) with an "admin" and a "member" group, and its first admin user from
+        admin_name and admin_email, in one step: the email must not be registered
+        yet (409), and nothing is created if any part fails. Personal email providers
+        (gmail, yahoo, ...) are rejected. The admin signs in with POST /auth/login.'
+      parameters:
+      - description: Organisation and its admin
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.createOrganisationRequest'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/handler.signupResponse'
+            $ref: '#/definitions/handler.organisationResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Create an organisation
+      tags:
+      - auth
+  /auth/users:
+    post:
+      consumes:
+      - application/json
+      description: 'Needs no session. organisation_id is required: the user gets the
+        basic "member" role in that organisation (404 if it doesn''t exist). Returns
+        the created user. There is no password; the user signs in with POST /auth/login
+        using the email. Personal email providers (gmail, yahoo, ...) are rejected.'
+      parameters:
+      - description: User details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.createUserRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/domain.User'
         "400":
           description: Bad Request
           schema:
@@ -183,9 +317,9 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/util.ErrorResponse'
-      summary: Sign up with a work email
+      summary: Create a user
       tags:
-      - users
+      - auth
   /groups:
     get:
       description: Returns only the groups in the given organisation (an empty list
@@ -397,68 +531,21 @@ paths:
       summary: List the users in a group
       tags:
       - groups
-  /organisations:
-    get:
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            items:
-              $ref: '#/definitions/domain.Organisation'
-            type: array
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/util.ErrorResponse'
-      summary: List all organisations
-      tags:
-      - organisations
-    post:
+  /organisation:
+    delete:
       consumes:
       - application/json
-      description: The name must be unique, ignoring case. An "admin" group is created
-        for the organisation automatically.
+      description: Admins only (403 for members). PERMANENTLY deletes the organisation,
+        its groups, all its users (the caller included) and all their records, in
+        one transaction. confirm_name must be the organisation's exact name (400 otherwise).
+        The users' sessions stop working immediately. Requires a session.
       parameters:
-      - description: Organisation to create
+      - description: Confirmation
         in: body
         name: body
         required: true
         schema:
-          $ref: '#/definitions/handler.organisationRequest'
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            $ref: '#/definitions/domain.Organisation'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/util.ErrorResponse'
-        "409":
-          description: Conflict
-          schema:
-            $ref: '#/definitions/util.ErrorResponse'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/util.ErrorResponse'
-      summary: Create an organisation
-      tags:
-      - organisations
-  /organisations/{id}:
-    delete:
-      description: Also deletes the organisation's groups. Fails with 409 while any
-        of those groups still has users.
-      parameters:
-      - description: Organisation ID
-        in: path
-        name: id
-        required: true
-        type: integer
+          $ref: '#/definitions/handler.deleteOrganisationRequest'
       responses:
         "204":
           description: No Content
@@ -466,6 +553,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/util.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
         "404":
           description: Not Found
           schema:
@@ -478,16 +573,12 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/util.ErrorResponse'
-      summary: Delete an organisation
+      summary: Delete my organisation
       tags:
       - organisations
     get:
-      parameters:
-      - description: Organisation ID
-        in: path
-        name: id
-        required: true
-        type: integer
+      description: The organisation of the signed-in user; no id is needed. 404 for
+        a user without an organisation. Requires a session.
       produces:
       - application/json
       responses:
@@ -495,8 +586,8 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/domain.Organisation'
-        "400":
-          description: Bad Request
+        "401":
+          description: Unauthorized
           schema:
             $ref: '#/definitions/util.ErrorResponse'
         "404":
@@ -507,19 +598,15 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/util.ErrorResponse'
-      summary: Get an organisation by ID
+      summary: Get my organisation
       tags:
       - organisations
     put:
       consumes:
       - application/json
-      description: The new name must be unique, ignoring case.
+      description: Admins only (403 for members). The new name must be unique, ignoring
+        case. Requires a session.
       parameters:
-      - description: Organisation ID
-        in: path
-        name: id
-        required: true
-        type: integer
       - description: New organisation details
         in: body
         name: body
@@ -537,6 +624,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/util.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
         "404":
           description: Not Found
           schema:
@@ -549,7 +644,25 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/util.ErrorResponse'
-      summary: Update an organisation
+      summary: Rename my organisation
+      tags:
+      - organisations
+  /organisations:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Organisation'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List all organisations
       tags:
       - organisations
   /records:

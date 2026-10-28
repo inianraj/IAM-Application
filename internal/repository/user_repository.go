@@ -43,13 +43,14 @@ func pgConstraint(err error) string {
 }
 
 // userColumns are in scanUser order.
-const userColumns = "id, name, email, group_id, organisation_id, created_at, updated_at"
+const userColumns = "id, name, email, group_id, organisation_id, signup_method, created_at, updated_at"
 
 // scanUser maps sql.ErrNoRows to ErrUserNotFound and a duplicate email to
 // ErrEmailTaken.
 func scanUser(row interface{ Scan(...any) error }) (domain.User, error) {
 	var u domain.User
-	err := row.Scan(&u.ID, &u.Name, &u.Email, &u.GroupID, &u.OrganisationID, &u.CreatedAt, &u.UpdatedAt)
+	var groupID, organisationID sql.NullInt64 // NULL for a user without an organisation
+	err := row.Scan(&u.ID, &u.Name, &u.Email, &groupID, &organisationID, &u.SignupMethod, &u.CreatedAt, &u.UpdatedAt)
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -58,25 +59,27 @@ func scanUser(row interface{ Scan(...any) error }) (domain.User, error) {
 		return domain.User{}, domain.ErrEmailTaken
 	}
 
+	u.GroupID = groupID.Int64
+	u.OrganisationID = organisationID.Int64
 	return u, err
 }
 
-// Create inserts the user into the default group of organisation
+// Create inserts the user into the member group of organisation
 // u.OrganisationID. It returns domain.ErrEmailTaken for a duplicate email,
 // domain.ErrOrganisationNotFound if the organisation does not exist, and
-// domain.ErrGroupNotFound if it has no default group.
+// domain.ErrGroupNotFound if it has no member group.
 func (r *UserRepository) Create(ctx context.Context, u domain.User) (domain.User, error) {
 	user, err := scanUser(r.db.QueryRowContext(ctx,
-		`INSERT INTO users (name, email, group_id, organisation_id)
-		 SELECT $1, $2, g.id, g.organisation_id FROM groups g
-		 WHERE g.organisation_id = $3 AND g.name = $4
+		`INSERT INTO users (name, email, signup_method, group_id, organisation_id)
+		 SELECT $1, $2, $3::text, g.id, g.organisation_id FROM groups g
+		 WHERE g.organisation_id = $4 AND g.name = $5
 		 RETURNING `+userColumns,
-		u.Name, u.Email, u.OrganisationID, domain.DefaultGroupName))
+		u.Name, u.Email, u.SignupMethod, u.OrganisationID, domain.MemberGroupName))
 	if !errors.Is(err, domain.ErrUserNotFound) {
 		return user, err
 	}
 
-	// No row was inserted: the organisation is missing, or it has no default
+	// No row was inserted: the organisation is missing, or it has no member
 	// group.
 	var orgExists bool
 	err = r.db.QueryRowContext(ctx,
@@ -89,7 +92,7 @@ func (r *UserRepository) Create(ctx context.Context, u domain.User) (domain.User
 		return domain.User{}, domain.ErrOrganisationNotFound
 	}
 
-	return domain.User{}, fmt.Errorf("%w: organisation has no %s group", domain.ErrGroupNotFound, domain.DefaultGroupName)
+	return domain.User{}, fmt.Errorf("%w: organisation has no %s group", domain.ErrGroupNotFound, domain.MemberGroupName)
 }
 
 func (r *UserRepository) GetByID(ctx context.Context, id int64) (domain.User, error) {
@@ -97,14 +100,21 @@ func (r *UserRepository) GetByID(ctx context.Context, id int64) (domain.User, er
 		`SELECT `+userColumns+` FROM users WHERE id = $1`, id))
 }
 
-// Update sets the user's name and email. The group and organisation are not
-// changed.
+// GetByEmail is used by login. email must be lower-cased. Unknown email →
+// ErrUserNotFound.
+func (r *UserRepository) GetByEmail(ctx context.Context, email string) (domain.User, error) {
+	return scanUser(r.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE email = $1`, email))
+}
+
+// Update sets the user's name. The email (the login identity), the group and
+// the organisation are not changed.
 func (r *UserRepository) Update(ctx context.Context, u domain.User) (domain.User, error) {
 	return scanUser(r.db.QueryRowContext(ctx,
-		`UPDATE users SET name = $1, email = $2, updated_at = NOW()
-		 WHERE id = $3
+		`UPDATE users SET name = $1, updated_at = NOW()
+		 WHERE id = $2
 		 RETURNING `+userColumns,
-		u.Name, u.Email, u.ID))
+		u.Name, u.ID))
 }
 
 // Delete removes the user. A user that still has records returns

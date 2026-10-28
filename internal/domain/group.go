@@ -1,8 +1,12 @@
 package domain
 
-// DefaultGroupName is the group every organisation gets when it is created,
-// and the group new users are signed up into.
-const DefaultGroupName = "admin"
+// Every organisation gets these two groups when it is created. A user in the
+// admin group is an admin of the organisation; the member group is the basic
+// role of users created with an organisation_id.
+const (
+	AdminGroupName  = "admin"
+	MemberGroupName = "member"
+)
 
 type Group struct {
 	ID             int64  `json:"id"`

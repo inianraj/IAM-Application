@@ -38,8 +38,18 @@ var personalDomainPatterns = []*regexp.Regexp{
 // Validate trims and checks the name and email, lower-casing the email and
 // rejecting personal email providers.
 func (u *User) Validate() error {
-	u.Name = strings.TrimSpace(u.Name)
+	if err := u.ValidateName(); err != nil {
+		return err
+	}
+
 	u.Email = strings.ToLower(strings.TrimSpace(u.Email))
+	return validateWorkEmail(u.Email)
+}
+
+// ValidateName trims and checks the name only. Updating a user changes the
+// name and never the email, which is the login identity.
+func (u *User) ValidateName() error {
+	u.Name = strings.TrimSpace(u.Name)
 
 	if u.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrInvalidUser)
@@ -48,7 +58,7 @@ func (u *User) Validate() error {
 		return fmt.Errorf("%w: name must be at most %d characters", ErrInvalidUser, maxNameLength)
 	}
 
-	return validateWorkEmail(u.Email)
+	return nil
 }
 
 func validateWorkEmail(email string) error {

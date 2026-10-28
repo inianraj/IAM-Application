@@ -18,28 +18,14 @@ func NewUserHandler(svc *service.UserService) *UserHandler {
 
 // Register adds the user routes to mux.
 func (h *UserHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/auth/signup", h.Signup)
-
 	mux.HandleFunc("GET /api/v1/users/{id}", h.GetByID)
 	mux.HandleFunc("PUT /api/v1/users/{id}", h.Update)
 	mux.HandleFunc("DELETE /api/v1/users/{id}", h.Delete)
 	mux.HandleFunc("PUT /api/v1/users/{id}/group", h.AssignGroup)
 }
 
-type signupRequest struct {
-	Name           string `json:"name" example:"Alice"`
-	Email          string `json:"email" example:"alice@company.com"`
-	OrganisationID int64  `json:"organisation_id" example:"1"`
-}
-
-type signupResponse struct {
-	Message string `json:"message" example:"signup successful"`
-	UserID  int64  `json:"user_id" example:"1"`
-}
-
 type updateUserRequest struct {
-	Name  string `json:"name" example:"Alice"`
-	Email string `json:"email" example:"alice@company.com"`
+	Name string `json:"name" example:"Alice"`
 }
 
 type assignGroupRequest struct {
@@ -52,36 +38,6 @@ type assignGroupResponse struct {
 }
 
 const invalidUserID = "invalid user ID"
-
-// Signup godoc
-// @Summary     Sign up with a work email
-// @Description Creates the user in the "admin" group of the given organisation (404 if the organisation doesn't exist). Personal email providers (gmail, yahoo, ...) are rejected.
-// @Tags        users
-// @Accept      json
-// @Produce     json
-// @Param       body body     signupRequest true "Signup details"
-// @Success     201  {object} signupResponse
-// @Failure     400  {object} util.ErrorResponse
-// @Failure     404  {object} util.ErrorResponse
-// @Failure     409  {object} util.ErrorResponse
-// @Failure     500  {object} util.ErrorResponse
-// @Router      /auth/signup [post]
-func (h *UserHandler) Signup(w http.ResponseWriter, r *http.Request) {
-	var req signupRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		util.Error(w, http.StatusBadRequest, "invalid JSON request")
-		return
-	}
-
-	user, err := h.service.Signup(r.Context(),
-		domain.User{Name: req.Name, Email: req.Email, OrganisationID: req.OrganisationID})
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-
-	util.JSON(w, http.StatusCreated, signupResponse{Message: "signup successful", UserID: user.ID})
-}
 
 // GetByID godoc
 // @Summary Get a user by ID
@@ -110,7 +66,7 @@ func (h *UserHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 
 // Update godoc
 // @Summary     Update a user
-// @Description Changes the name and email (work email only). The group is changed with the assign-group endpoint.
+// @Description Changes the name only: the email is the login identity and cannot be changed (an email field is rejected). Needs user:update:own for yourself, user:update:org for others. The group is changed with the assign-group endpoint.
 // @Tags        users
 // @Accept      json
 // @Produce     json
@@ -135,7 +91,7 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := h.service.Update(r.Context(),
-		domain.User{ID: id, Name: req.Name, Email: req.Email})
+		domain.User{ID: id, Name: req.Name})
 	if err != nil {
 		writeServiceError(w, err)
 		return

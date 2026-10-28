@@ -27,3 +27,10 @@ func (o *Organisation) Validate() error {
 
 	return nil
 }
+
+// DeletedOrganisation lists what deleting an organisation removed besides the
+// organisation and its groups, so cached copies can be dropped.
+type DeletedOrganisation struct {
+	UserIDs   []int64
+	RecordIDs []int64
+}

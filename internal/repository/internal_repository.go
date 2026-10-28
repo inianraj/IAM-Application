@@ -16,13 +16,14 @@ func NewTaskRepository(db *sql.DB) *TaskRepository {
 	return &TaskRepository{db: db}
 }
 
-const taskColumns = "id, user_id, title, description, created_at, updated_at"
+const taskColumns = "id, user_id, organisation_id, title, description, created_at, updated_at"
 
 // scanTask maps sql.ErrNoRows to ErrTaskNotFound, and a user_id that
 // references no user (only possible on insert) to ErrUserNotFound.
 func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 	var t domain.Task
-	err := row.Scan(&t.ID, &t.UserID, &t.Title, &t.Description, &t.CreatedAt, &t.UpdatedAt)
+	var organisationID sql.NullInt64 // NULL for owners without an organisation
+	err := row.Scan(&t.ID, &t.UserID, &organisationID, &t.Title, &t.Description, &t.CreatedAt, &t.UpdatedAt)
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -31,13 +32,18 @@ func scanTask(row interface{ Scan(...any) error }) (domain.Task, error) {
 		return domain.Task{}, domain.ErrUserNotFound
 	}
 
+	t.OrganisationID = organisationID.Int64
 	return t, err
 }
 
+// Create stores the record with the owner's organisation (t.OrganisationID,
+// NULL when 0).
 func (r *TaskRepository) Create(ctx context.Context, t domain.Task) (domain.Task, error) {
+	organisationID := sql.NullInt64{Int64: t.OrganisationID, Valid: t.OrganisationID != 0}
+
 	return scanTask(r.db.QueryRowContext(ctx,
-		`INSERT INTO records (user_id, title, description) VALUES ($1, $2, $3) RETURNING `+taskColumns,
-		t.UserID, t.Title, t.Description))
+		`INSERT INTO records (user_id, organisation_id, title, description) VALUES ($1, $2, $3, $4) RETURNING `+taskColumns,
+		t.UserID, organisationID, t.Title, t.Description))
 }
 
 func (r *TaskRepository) GetByID(ctx context.Context, id int64) (domain.Task, error) {
@@ -52,7 +58,7 @@ func (r *TaskRepository) ListByUser(ctx context.Context, userID int64) ([]domain
 	// LEFT JOIN so a user without records still yields one row (with NULL
 	// record columns), which tells them apart from a missing user.
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT r.id, r.title, r.description, r.created_at, r.updated_at
+		`SELECT r.id, r.organisation_id, r.title, r.description, r.created_at, r.updated_at
 		 FROM users u LEFT JOIN records r ON r.user_id = u.id
 		 WHERE u.id = $1
 		 ORDER BY r.id`,
@@ -67,20 +73,21 @@ func (r *TaskRepository) ListByUser(ctx context.Context, userID int64) ([]domain
 	for rows.Next() {
 		found = true
 
-		var id sql.NullInt64
+		var id, organisationID sql.NullInt64
 		var title, description sql.NullString
 		var createdAt, updatedAt sql.NullTime
-		if err := rows.Scan(&id, &title, &description, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&id, &organisationID, &title, &description, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		if id.Valid {
 			tasks = append(tasks, domain.Task{
-				ID:          id.Int64,
-				UserID:      userID,
-				Title:       title.String,
-				Description: description.String,
-				CreatedAt:   createdAt.Time,
-				UpdatedAt:   updatedAt.Time,
+				ID:             id.Int64,
+				UserID:         userID,
+				OrganisationID: organisationID.Int64,
+				Title:          title.String,
+				Description:    description.String,
+				CreatedAt:      createdAt.Time,
+				UpdatedAt:      updatedAt.Time,
 			})
 		}
 	}
@@ -93,6 +100,29 @@ func (r *TaskRepository) ListByUser(ctx context.Context, userID int64) ([]domain
 	}
 
 	return tasks, nil
+}
+
+// ListByOrganisation returns every record of the organisation's users ordered
+// by id (an empty slice, never nil, when there are none).
+func (r *TaskRepository) ListByOrganisation(ctx context.Context, organisationID int64) ([]domain.Task, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+taskColumns+` FROM records WHERE organisation_id = $1 ORDER BY id`,
+		organisationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := []domain.Task{}
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+
+	return tasks, rows.Err()
 }
 
 // Update sets the record's title and description. The owner is not changed.

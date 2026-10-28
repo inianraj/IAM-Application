@@ -96,24 +96,43 @@ func (h *RecordHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetAll godoc
-// @Summary     List the records of a user
-// @Description Returns only the records that belong to the given user (an empty list if they have none).
+// @Summary     List records
+// @Description With user_id: that user's records (record:read:own for yourself, record:read:org for others). With scope=org: every record of your organisation (needs record:read:org). With neither: your own records. An empty list if there are none.
 // @Tags        records
 // @Produce     json
-// @Param       user_id query    int true "User ID"
+// @Param       user_id query    int    false "User ID"
+// @Param       scope   query    string false "Use org for every record of your organisation" Enums(org)
 // @Success     200     {array}  domain.Task
 // @Failure     400     {object} util.ErrorResponse
+// @Failure     403     {object} util.ErrorResponse
 // @Failure     404     {object} util.ErrorResponse
 // @Failure     500     {object} util.ErrorResponse
 // @Router      /records [get]
 func (h *RecordHandler) GetAll(w http.ResponseWriter, r *http.Request) {
-	userID, err := strconv.ParseInt(r.URL.Query().Get("user_id"), 10, 64)
-	if err != nil || userID <= 0 {
-		util.Error(w, http.StatusBadRequest, "user_id query parameter is required and must be a positive integer")
-		return
-	}
+	query := r.URL.Query()
 
-	records, err := h.service.ListByUser(r.Context(), userID)
+	var records []domain.Task
+	var err error
+
+	switch {
+	case query.Get("scope") == "org":
+		records, err = h.service.ListByOrganisation(r.Context())
+
+	case query.Get("scope") != "":
+		util.Error(w, http.StatusBadRequest, "scope must be org")
+		return
+
+	case query.Get("user_id") != "":
+		userID, parseErr := strconv.ParseInt(query.Get("user_id"), 10, 64)
+		if parseErr != nil || userID <= 0 {
+			util.Error(w, http.StatusBadRequest, "user_id must be a positive integer")
+			return
+		}
+		records, err = h.service.ListByUser(r.Context(), userID)
+
+	default:
+		records, err = h.service.ListMine(r.Context())
+	}
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -232,7 +251,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, domain.ErrInvalidGroupID),
 		errors.Is(err, domain.ErrInvalidOrganisation),
 		errors.Is(err, domain.ErrInvalidOrganisationID),
-		errors.Is(err, domain.ErrGroupNotInOrganisation):
+		errors.Is(err, domain.ErrGroupNotInOrganisation),
+		errors.Is(err, domain.ErrBuiltinGroup):
 		util.Error(w, http.StatusBadRequest, err.Error())
 
 	case errors.Is(err, domain.ErrTaskNotFound):
@@ -250,6 +270,23 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, domain.ErrOrganisationExists),
 		errors.Is(err, domain.ErrOrganisationInUse):
 		util.Error(w, http.StatusConflict, err.Error())
+
+	case errors.Is(err, domain.ErrInvalidCredentials),
+		errors.Is(err, domain.ErrUnauthenticated):
+		util.Error(w, http.StatusUnauthorized, err.Error())
+
+	case errors.Is(err, domain.ErrWrongSignupMethod),
+		errors.Is(err, domain.ErrForbidden):
+		util.Error(w, http.StatusForbidden, err.Error())
+
+	case errors.Is(err, domain.ErrTooManyAttempts):
+		// The failure window in session.LoginLimiter is 15 minutes.
+		w.Header().Set("Retry-After", "900")
+		util.Error(w, http.StatusTooManyRequests, err.Error())
+
+	case errors.Is(err, domain.ErrUnavailable):
+		// err may wrap a Redis error; keep its details out of the response.
+		util.Error(w, http.StatusServiceUnavailable, domain.ErrUnavailable.Error())
 
 	default:
 		// Keep internal database details out of public responses.
