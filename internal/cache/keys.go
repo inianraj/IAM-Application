@@ -38,6 +38,6 @@ func orgRecordsKey(orgID int64) string {
 	return keyPrefix + "records:org:" + strconv.FormatInt(orgID, 10)
 }
 
-func groupPermissionsKey(groupID int64) string {
-	return keyPrefix + "perms:group:" + strconv.FormatInt(groupID, 10)
+func userPermissionsKey(userID int64) string {
+	return keyPrefix + "perms:user:" + strconv.FormatInt(userID, 10)
 }

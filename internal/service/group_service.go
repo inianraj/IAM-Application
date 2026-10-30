@@ -8,29 +8,29 @@ import (
 )
 
 type GroupStore interface {
-	Create(ctx context.Context, g domain.Group, permissions []string) (domain.Group, error)
+	Create(ctx context.Context, g domain.Group, roleIDs []int64) (domain.Group, error)
 	GetByID(ctx context.Context, id int64) (domain.Group, error)
 	ListByOrganisation(ctx context.Context, organisationID int64) ([]domain.Group, error)
 	Update(ctx context.Context, g domain.Group) (domain.Group, error)
 	Delete(ctx context.Context, id int64) error
 	ListMembers(ctx context.Context, groupID int64) ([]domain.GroupMember, error)
 
-	Permissions(ctx context.Context, groupID int64) ([]string, error)
-	SetPermissions(ctx context.Context, groupID int64, permissions []string) error
-	ListPermissions(ctx context.Context) ([]domain.Permission, error)
+	Roles(ctx context.Context, groupID int64) ([]domain.Role, error)
+	SetRoles(ctx context.Context, groupID int64, roleIDs []int64) error
 }
 
 // GroupService applies the group rules. Every operation needs a group:*
-// permission in the organisation the group belongs to, and the two built-in
-// groups (admin, member) cannot be renamed, deleted or given other
-// permissions. A group can't be moved to another organisation.
+// permission in the organisation the group belongs to; choosing the roles of a
+// group needs role:assign, and a caller can only hand out roles whose
+// permissions they hold. A group can't be moved to another organisation.
 type GroupService struct {
 	store GroupStore
+	roles RoleReader
 	authz *authz.Authorizer
 }
 
-func NewGroupService(store GroupStore, az *authz.Authorizer) *GroupService {
-	return &GroupService{store: store, authz: az}
+func NewGroupService(store GroupStore, roles RoleReader, az *authz.Authorizer) *GroupService {
+	return &GroupService{store: store, roles: roles, authz: az}
 }
 
 func checkGroupID(id int64) error {
@@ -40,10 +40,9 @@ func checkGroupID(id int64) error {
 	return nil
 }
 
-// Create makes a group with the given permissions, or with the member set when
-// permissions is nil. Choosing permissions needs group:manage_permissions in
-// addition to group:create.
-func (s *GroupService) Create(ctx context.Context, g domain.Group, permissions []string) (domain.Group, error) {
+// Create makes a group, with the given roles or with none. Choosing roles
+// needs role:assign in addition to group:create.
+func (s *GroupService) Create(ctx context.Context, g domain.Group, roleIDs []int64) (domain.Group, error) {
 	if g.OrganisationID <= 0 {
 		return domain.Group{}, domain.ErrInvalidOrganisationID
 	}
@@ -54,17 +53,20 @@ func (s *GroupService) Create(ctx context.Context, g domain.Group, permissions [
 		return domain.Group{}, err
 	}
 
-	if permissions == nil {
-		permissions = domain.MemberPermissions()
-	} else {
-		if err := s.authz.Require(ctx, domain.PermGroupManagePerms, g.OrganisationID, domain.ErrOrganisationNotFound); err != nil {
+	roleIDs, err := checkRoleIDs(roleIDs)
+	if err != nil {
+		return domain.Group{}, err
+	}
+	if len(roleIDs) > 0 {
+		if err := s.authz.Require(ctx, domain.PermRoleAssign, g.OrganisationID, domain.ErrOrganisationNotFound); err != nil {
 			return domain.Group{}, err
 		}
-		// Unknown keys are rejected by the database when they are stored.
-		permissions = domain.UniquePermissions(permissions)
+		if err := ensureGrantable(ctx, s.authz, s.roles, roleIDs); err != nil {
+			return domain.Group{}, err
+		}
 	}
 
-	return s.store.Create(ctx, g, permissions)
+	return s.store.Create(ctx, g, roleIDs)
 }
 
 func (s *GroupService) Get(ctx context.Context, id int64) (domain.Group, error) {
@@ -112,9 +114,6 @@ func (s *GroupService) Update(ctx context.Context, g domain.Group) (domain.Group
 	if err := s.authz.Require(ctx, domain.PermGroupUpdate, g.OrganisationID, domain.ErrOrganisationNotFound); err != nil {
 		return domain.Group{}, err
 	}
-	if domain.IsBuiltinGroup(existing.Name) {
-		return domain.Group{}, domain.ErrBuiltinGroup
-	}
 
 	if err := g.Validate(); err != nil {
 		return domain.Group{}, err
@@ -134,9 +133,6 @@ func (s *GroupService) Delete(ctx context.Context, id int64) error {
 	if err := s.authz.Require(ctx, domain.PermGroupDelete, existing.OrganisationID, domain.ErrGroupNotFound); err != nil {
 		return err
 	}
-	if domain.IsBuiltinGroup(existing.Name) {
-		return domain.ErrBuiltinGroup
-	}
 	return s.store.Delete(ctx, id)
 }
 
@@ -155,9 +151,8 @@ func (s *GroupService) ListMembers(ctx context.Context, groupID int64) ([]domain
 	return s.store.ListMembers(ctx, groupID)
 }
 
-// GetPermissions returns the permissions of a group of the caller's
-// organisation.
-func (s *GroupService) GetPermissions(ctx context.Context, groupID int64) ([]string, error) {
+// GetRoles returns the roles of a group of the caller's organisation.
+func (s *GroupService) GetRoles(ctx context.Context, groupID int64) ([]domain.Role, error) {
 	if err := checkGroupID(groupID); err != nil {
 		return nil, err
 	}
@@ -169,12 +164,14 @@ func (s *GroupService) GetPermissions(ctx context.Context, groupID int64) ([]str
 	if err := s.authz.Require(ctx, domain.PermGroupRead, g.OrganisationID, domain.ErrGroupNotFound); err != nil {
 		return nil, err
 	}
-	return s.store.Permissions(ctx, groupID)
+	return s.store.Roles(ctx, groupID)
 }
 
-// SetPermissions replaces the permissions of a custom group. Every key must be
-// in the catalogue; the built-in groups cannot be changed.
-func (s *GroupService) SetPermissions(ctx context.Context, groupID int64, permissions []string) ([]string, error) {
+// SetRoles replaces the roles of a group. It needs role:assign, every role
+// must be in the group's organisation, and the caller must hold the
+// permissions of each role this call adds or removes. The members get the
+// change on their next request.
+func (s *GroupService) SetRoles(ctx context.Context, groupID int64, roleIDs []int64) ([]domain.Role, error) {
 	if err := checkGroupID(groupID); err != nil {
 		return nil, err
 	}
@@ -183,31 +180,24 @@ func (s *GroupService) SetPermissions(ctx context.Context, groupID int64, permis
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authz.Require(ctx, domain.PermGroupManagePerms, g.OrganisationID, domain.ErrGroupNotFound); err != nil {
+	if err := s.authz.Require(ctx, domain.PermRoleAssign, g.OrganisationID, domain.ErrGroupNotFound); err != nil {
 		return nil, err
 	}
-	if domain.IsBuiltinGroup(g.Name) {
-		return nil, domain.ErrBuiltinGroup
-	}
 
-	// Unknown keys are rejected by the database, which rolls the change back.
-	unique := domain.UniquePermissions(permissions)
-	if err := s.store.SetPermissions(ctx, groupID, unique); err != nil {
-		return nil, err
-	}
-	return unique, nil
-}
-
-// ListPermissions returns every permission a group can be given, to build the
-// list a group's permissions are picked from. It needs
-// group:manage_permissions.
-func (s *GroupService) ListPermissions(ctx context.Context) ([]domain.Permission, error) {
-	caller, err := s.authz.Caller(ctx)
+	roleIDs, err = checkRoleIDs(roleIDs)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authz.Require(ctx, domain.PermGroupManagePerms, caller.OrganisationID, domain.ErrOrganisationNotFound); err != nil {
+	old, err := s.store.Roles(ctx, groupID)
+	if err != nil {
 		return nil, err
 	}
-	return s.store.ListPermissions(ctx)
+	if err := ensureGrantable(ctx, s.authz, s.roles, changedRoleIDs(old, roleIDs)); err != nil {
+		return nil, err
+	}
+
+	if err := s.store.SetRoles(ctx, groupID, roleIDs); err != nil {
+		return nil, err
+	}
+	return s.store.Roles(ctx, groupID)
 }

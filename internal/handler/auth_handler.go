@@ -31,14 +31,20 @@ func (h *AuthHandler) Register(mux *http.ServeMux) {
 }
 
 type createUserRequest struct {
-	Name  string `json:"name" example:"Alice"`
-	Email string `json:"email" example:"alice@company.com"`
+	Name     string `json:"name" example:"Alice"`
+	Email    string `json:"email" example:"alice@company.com"`
+	Password string `json:"password" example:"s3cret-pass"`
+	// RoleIDs are IDs from GET /roles. Leave the field out to give the user the
+	// member role.
+	RoleIDs []int64 `json:"role_ids,omitempty" example:"4"`
 }
 
 type createOrganisationRequest struct {
 	Name       string `json:"name" example:"Acme Corp"`
 	AdminName  string `json:"admin_name" example:"Alice"`
 	AdminEmail string `json:"admin_email" example:"alice@company.com"`
+	// AdminPassword is the owner's password (8 to 72 bytes).
+	AdminPassword string `json:"admin_password" example:"s3cret-pass"`
 }
 
 type organisationResponse struct {
@@ -49,7 +55,7 @@ type organisationResponse struct {
 
 // CreateOrganisation godoc
 // @Summary     Create an organisation
-// @Description Needs no session. Creates the organisation (name unique, ignoring case) with an "admin" and a "member" group, and its first admin user from admin_name and admin_email, in one step: the email must not be registered yet (409), and nothing is created if any part fails. Personal email providers (gmail, yahoo, ...) are rejected. The admin signs in with POST /auth/login.
+// @Description Needs no session. Creates the organisation (name unique, ignoring case) with its four built-in roles (owner, admin, member, guest) and its first user from admin_name, admin_email and admin_password (8 to 72 bytes), who gets the owner role, in one step: the email must not be registered yet (409), and nothing is created if any part fails. Personal email providers (gmail, yahoo, ...) are rejected. The owner signs in with POST /auth/login using the email and password.
 // @Tags        auth
 // @Accept      json
 // @Produce     json
@@ -68,7 +74,7 @@ func (h *AuthHandler) CreateOrganisation(w http.ResponseWriter, r *http.Request)
 
 	org, admin, err := h.organisations.Create(r.Context(),
 		domain.Organisation{Name: req.Name},
-		domain.User{Name: req.AdminName, Email: req.AdminEmail})
+		domain.User{Name: req.AdminName, Email: req.AdminEmail, Password: req.AdminPassword})
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -79,7 +85,7 @@ func (h *AuthHandler) CreateOrganisation(w http.ResponseWriter, r *http.Request)
 
 // CreateUser godoc
 // @Summary     Create a user
-// @Description Requires a session and the user:assign_group permission (admins). The user is added to your own organisation in the basic "member" group; there is no way to join an organisation without an admin. Returns the created user. There is no password; the user signs in with POST /auth/login using the email. Personal email providers (gmail, yahoo, ...) are rejected.
+// @Description Requires a session and the user:assign_group permission (admins). The user is added to your own organisation with the member role (or the role_ids you give, which needs role:assign and permissions you hold yourself) and no group; there is no way to join an organisation without an admin. Returns the created user. A password is required (8 to 72 bytes); the user signs in with POST /auth/login using the email and password. Personal email providers (gmail, yahoo, ...) are rejected.
 // @Tags        auth
 // @Accept      json
 // @Produce     json
@@ -100,7 +106,7 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := h.users.Create(r.Context(),
-		domain.User{Name: req.Name, Email: req.Email})
+		domain.User{Name: req.Name, Email: req.Email, Password: req.Password}, req.RoleIDs)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -110,16 +116,17 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 type loginRequest struct {
-	Email string `json:"email" example:"alice@company.com"`
+	Email    string `json:"email" example:"alice@company.com"`
+	Password string `json:"password" example:"s3cret-pass"`
 }
 
 // Login godoc
-// @Summary     Sign in with an email
-// @Description There is no password: knowing the email of a user created with POST /auth/users is enough (development only, no proof of ownership). On success, sets an HttpOnly "session" cookie (SameSite=Strict) that the browser sends on later requests, and returns the user. Accounts can only sign in with the method they were created with (403 for google/github accounts). An unknown email returns 401. After 5 failed attempts per email and IP, 429 for 15 minutes.
+// @Summary     Sign in with an email and password
+// @Description Checks the email and password; a wrong password and an unknown email both return 401 "invalid email or password". On success, sets an HttpOnly "session" cookie (SameSite=Strict) that the browser sends on later requests, and returns the user. Accounts can only sign in with the method they were created with (403 for google/github accounts). After 5 failed attempts per email and IP, 429 for 15 minutes.
 // @Tags        auth
 // @Accept      json
 // @Produce     json
-// @Param       body body     loginRequest true "Email"
+// @Param       body body     loginRequest true "Email and password"
 // @Success     200  {object} domain.User
 // @Failure     400  {object} util.ErrorResponse
 // @Failure     401  {object} util.ErrorResponse
@@ -139,7 +146,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		ip = r.RemoteAddr
 	}
 
-	token, user, err := h.service.Login(r.Context(), req.Email,
+	token, user, err := h.service.Login(r.Context(), req.Email, req.Password,
 		service.LoginMeta{IP: ip, UserAgent: r.UserAgent()})
 	if err != nil {
 		writeServiceError(w, err)

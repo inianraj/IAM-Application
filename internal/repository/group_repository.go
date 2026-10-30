@@ -44,8 +44,10 @@ func scanGroup(row interface{ Scan(...any) error }) (domain.Group, error) {
 	return g, err
 }
 
-// Create inserts the group together with its permissions, in one transaction.
-func (r *GroupRepository) Create(ctx context.Context, g domain.Group, permissions []string) (domain.Group, error) {
+// Create inserts the group together with its roles (none when roleIDs is
+// empty), in one transaction. A role that does not exist in the group's
+// organisation returns domain.ErrRoleNotFound.
+func (r *GroupRepository) Create(ctx context.Context, g domain.Group, roleIDs []int64) (domain.Group, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Group{}, err
@@ -59,7 +61,7 @@ func (r *GroupRepository) Create(ctx context.Context, g domain.Group, permission
 		return domain.Group{}, err
 	}
 
-	if err := insertGroupPermissions(ctx, tx, created.ID, permissions); err != nil {
+	if err := insertGroupRoles(ctx, tx, created.ID, created.OrganisationID, roleIDs); err != nil {
 		return domain.Group{}, err
 	}
 
@@ -201,4 +203,66 @@ func (r *GroupRepository) ListMembers(ctx context.Context, groupID int64) ([]dom
 	}
 
 	return members, nil
+}
+
+// insertGroupRoles gives the group the roles. The composite foreign key
+// guarantees each role is in the group's organisation; anything else is
+// domain.ErrRoleNotFound.
+func insertGroupRoles(ctx context.Context, q execer, groupID, organisationID int64, roleIDs []int64) error {
+	for _, id := range roleIDs {
+		_, err := q.ExecContext(ctx,
+			`INSERT INTO group_roles (group_id, role_id, organisation_id) VALUES ($1, $2, $3)`,
+			groupID, id, organisationID)
+		if pgCode(err) == foreignKeyViolation {
+			return domain.ErrRoleNotFound
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Roles returns the roles of the group, oldest first (an empty slice, never
+// nil, for a group without any).
+func (r *GroupRepository) Roles(ctx context.Context, groupID int64) ([]domain.Role, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT r.id, r.organisation_id, r.name
+		 FROM group_roles gr JOIN roles r ON r.id = gr.role_id
+		 WHERE gr.group_id = $1 ORDER BY r.id`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	return scanRoles(rows)
+}
+
+// SetRoles replaces the group's roles in one transaction. It returns
+// domain.ErrGroupNotFound if the group does not exist and
+// domain.ErrRoleNotFound for a role that is missing or belongs to another
+// organisation.
+func (r *GroupRepository) SetRoles(ctx context.Context, groupID int64, roleIDs []int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // no-op after Commit
+
+	var organisationID int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT organisation_id FROM groups WHERE id = $1 FOR UPDATE`, groupID).Scan(&organisationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ErrGroupNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM group_roles WHERE group_id = $1`, groupID); err != nil {
+		return err
+	}
+	if err := insertGroupRoles(ctx, tx, groupID, organisationID, roleIDs); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }

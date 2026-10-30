@@ -97,12 +97,12 @@ func (s *CachedOrganisationStore) Delete(ctx context.Context, id int64) (domain.
 	keys := []string{organisationKey(id), organisationsKey, orgGroupsKey(id), orgRecordsKey(id)}
 	if listErr == nil {
 		for _, g := range groups {
-			keys = append(keys, groupKey(g.ID), groupMembersKey(g.ID), groupPermissionsKey(g.ID))
+			keys = append(keys, groupKey(g.ID), groupMembersKey(g.ID))
 		}
 	}
 	// The users and their records went with the organisation.
 	for _, uid := range deleted.UserIDs {
-		keys = append(keys, userKey(uid), userRecordsKey(uid))
+		keys = append(keys, userKey(uid), userRecordsKey(uid), userPermissionsKey(uid))
 	}
 	for _, rid := range deleted.RecordIDs {
 		keys = append(keys, recordKey(rid))

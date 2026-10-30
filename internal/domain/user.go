@@ -15,11 +15,18 @@ type User struct {
 	SignupMethod string    `json:"signup_method" example:"email"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// Password is the plain password on its way in (create only) and
+	// PasswordHash the bcrypt hash stored in the NOT NULL users.password_hash
+	// column. Neither is ever written to JSON, so neither reaches an API
+	// response or the Redis cache.
+	Password     string `json:"-"`
+	PasswordHash string `json:"-"`
 }
 
 // The values allowed by the users_signup_method_check constraint.
 const (
-	// SignupMethodEmail users have no password and sign in with their email.
+	// SignupMethodEmail users sign in with their email and password.
 	SignupMethodEmail  = "email"
 	SignupMethodGoogle = "google"
 	SignupMethodGitHub = "github"

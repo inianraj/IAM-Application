@@ -5,6 +5,7 @@ import { loginView, createOrganisationView } from "./views/auth.js";
 import { recordsView } from "./views/records.js";
 import { groupsView } from "./views/groups.js";
 import { peopleView } from "./views/people.js";
+import { rolesView } from "./views/roles.js";
 import { organisationView } from "./views/organisation.js";
 
 // Screens for visitors who are not logged in.
@@ -18,7 +19,8 @@ const publicRoutes = {
 const privateRoutes = {
   "/records": { label: "Records", view: recordsView, show: () => true },
   "/groups": { label: "Groups", view: groupsView, show: () => can("group:read") },
-  "/people": { label: "People", view: peopleView, show: () => can("group:read") },
+  "/people": { label: "People", view: peopleView, show: () => can("user:read") },
+  "/roles": { label: "Roles", view: rolesView, show: () => can("role:read") },
   "/organisation": { label: "Organisation", view: organisationView, show: () => can("organisation:read") },
 };
 

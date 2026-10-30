@@ -38,15 +38,18 @@ func NewAuthService(users UserLookup, sessions session.Store, limiter LoginLimit
 	return &AuthService{users: users, sessions: sessions, limiter: limiter}
 }
 
-// Login signs a user in by email and returns the session token. There is no
-// secret to check: knowing the email of an "email" account is enough.
+// Login signs a user in by email and password and returns the session token.
 //
-// Order of checks: rate limit, user lookup, sign-in method. An unknown email
-// counts towards the rate limit, which slows down guessing emails.
-func (s *AuthService) Login(ctx context.Context, email string, meta LoginMeta) (string, domain.User, error) {
+// Order of checks: rate limit, user lookup, sign-in method, password. An
+// unknown email and a wrong password give the same error and both count
+// towards the rate limit, which slows down guessing.
+func (s *AuthService) Login(ctx context.Context, email, password string, meta LoginMeta) (string, domain.User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return "", domain.User{}, fmt.Errorf("%w: email is required", domain.ErrInvalidUser)
+	}
+	if password == "" {
+		return "", domain.User{}, fmt.Errorf("%w: password is required", domain.ErrInvalidUser)
 	}
 
 	blocked, err := s.limiter.Blocked(ctx, email, meta.IP)
@@ -59,6 +62,7 @@ func (s *AuthService) Login(ctx context.Context, email string, meta LoginMeta) (
 
 	user, err := s.users.GetByEmail(ctx, email)
 	if errors.Is(err, domain.ErrUserNotFound) {
+		domain.BurnPasswordCheck(password)
 		_ = s.limiter.Fail(ctx, email, meta.IP)
 		return "", domain.User{}, domain.ErrInvalidCredentials
 	}
@@ -68,6 +72,11 @@ func (s *AuthService) Login(ctx context.Context, email string, meta LoginMeta) (
 
 	if err := domain.CheckSignInMethod(user, domain.SignupMethodEmail); err != nil {
 		return "", domain.User{}, err
+	}
+
+	if !domain.CheckPassword(user.PasswordHash, password) {
+		_ = s.limiter.Fail(ctx, email, meta.IP)
+		return "", domain.User{}, domain.ErrInvalidCredentials
 	}
 
 	_ = s.limiter.Reset(ctx, email, meta.IP)

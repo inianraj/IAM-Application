@@ -52,10 +52,12 @@ func main() {
 
 	userRepo := repository.NewUserRepository(db)
 	groupRepo := repository.NewGroupRepository(db)
+	roleRepo := repository.NewRoleRepository(db)
 
 	var recordStore service.TaskStore = repository.NewTaskRepository(db)
 	var userStore service.UserStore = userRepo
 	var groupStore service.GroupStore = groupRepo
+	var roleStore service.RoleStore = roleRepo
 	var organisationStore service.OrganisationStore = repository.NewOrganisationRepository(db)
 
 	// Redis is required: it holds the login sessions, and the API refuses to
@@ -78,6 +80,7 @@ func main() {
 	recordStore = cache.NewTaskStore(recordStore, rdb, cfg.CacheTTL, logger)
 	userStore = cache.NewUserStore(userStore, rdb, cfg.CacheTTL, logger)
 	groupStore = cache.NewGroupStore(groupStore, rdb, cfg.CacheTTL, logger)
+	roleStore = cache.NewRoleStore(roleStore, rdb, cfg.CacheTTL, logger)
 	organisationStore = cache.NewOrganisationStore(organisationStore, groupRepo, rdb, cfg.CacheTTL, logger)
 	logger.Info("redis enabled", "address", cfg.RedisAddr, "cache_ttl", cfg.CacheTTL, "session_ttl", cfg.SessionTTL)
 
@@ -103,11 +106,11 @@ func main() {
 
 	// Authentication and authorization read users and groups through the
 	// cached stores, so they always see current data.
-	authorizer := authz.New(userStore, groupStore)
+	authorizer := authz.New(userStore, userStore)
 	sessions := session.NewRedisStore(rdb, cfg.SessionTTL)
 	cookie := auth.CookieConfig{Secure: cfg.CookieSecure, TTL: cfg.SessionTTL}
 
-	userService := service.NewUserService(userStore, authorizer)
+	userService := service.NewUserService(userStore, groupStore, roleStore, authorizer)
 	userHandler := handler.NewUserHandler(userService)
 
 	organisationService := service.NewOrganisationService(organisationStore, authorizer)
@@ -119,8 +122,11 @@ func main() {
 	recordService := service.NewTaskService(recordStore, authorizer)
 	recordHandler := handler.NewRecordHandler(recordService)
 
-	groupService := service.NewGroupService(groupStore, authorizer)
+	groupService := service.NewGroupService(groupStore, roleStore, authorizer)
 	groupHandler := handler.NewGroupHandler(groupService)
+
+	roleService := service.NewRoleService(roleStore, authorizer)
+	roleHandler := handler.NewRoleHandler(roleService)
 
 	authMiddleware := auth.NewMiddleware(sessions, userStore, cookie, router.PublicRoutes, logger)
 
@@ -129,6 +135,7 @@ func main() {
 		Records:       recordHandler,
 		Users:         userHandler,
 		Groups:        groupHandler,
+		Roles:         roleHandler,
 		Organisations: organisationHandler,
 		Middleware: []func(http.Handler) http.Handler{
 			auth.OriginGuard(cfg.AllowedOrigins),

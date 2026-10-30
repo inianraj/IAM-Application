@@ -67,9 +67,15 @@ func (f *fakeLimiter) Reset(_ context.Context, email, _ string) error {
 	return nil
 }
 
+const annPassword = "correct-horse"
+
 func newAuth() (*AuthService, *fakeSessions, *fakeLimiter) {
+	annHash, err := domain.HashPassword(annPassword)
+	if err != nil {
+		panic(err)
+	}
 	users := &fakeUsers{users: map[string]domain.User{
-		"ann@corp.com":  {ID: 1, Email: "ann@corp.com", OrganisationID: 4, SignupMethod: domain.SignupMethodEmail},
+		"ann@corp.com":  {ID: 1, Email: "ann@corp.com", OrganisationID: 4, SignupMethod: domain.SignupMethodEmail, PasswordHash: annHash},
 		"gina@corp.com": {ID: 2, Email: "gina@corp.com", OrganisationID: 4, SignupMethod: domain.SignupMethodGoogle},
 		"gary@corp.com": {ID: 3, Email: "gary@corp.com", OrganisationID: 4, SignupMethod: domain.SignupMethodGitHub},
 	}}
@@ -85,7 +91,7 @@ func TestLoginSuccess(t *testing.T) {
 	svc, sessions, limiter := newAuth()
 	limiter.failures["ann@corp.com"] = 2
 
-	token, user, err := svc.Login(context.Background(), "  Ann@Corp.com ", meta)
+	token, user, err := svc.Login(context.Background(), "  Ann@Corp.com ", annPassword, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,21 +111,24 @@ func TestLoginRejections(t *testing.T) {
 	tests := []struct {
 		name         string
 		email        string
+		password     string
 		wantErr      error
 		wantContains string
 		wantFailures int
 	}{
-		{"unknown email", "nobody@corp.com", domain.ErrInvalidCredentials, "", 1},
-		{"google account", "gina@corp.com", domain.ErrWrongSignupMethod, "created with google, sign in with google", 0},
-		{"github account", "gary@corp.com", domain.ErrWrongSignupMethod, "sign in with github", 0},
-		{"missing email", "", domain.ErrInvalidUser, "", 0},
+		{"unknown email", "nobody@corp.com", annPassword, domain.ErrInvalidCredentials, "", 1},
+		{"wrong password", "ann@corp.com", "wrong-password", domain.ErrInvalidCredentials, "", 1},
+		{"google account", "gina@corp.com", annPassword, domain.ErrWrongSignupMethod, "created with google, sign in with google", 0},
+		{"github account", "gary@corp.com", annPassword, domain.ErrWrongSignupMethod, "sign in with github", 0},
+		{"missing email", "", annPassword, domain.ErrInvalidUser, "", 0},
+		{"missing password", "ann@corp.com", "", domain.ErrInvalidUser, "", 0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			svc, sessions, limiter := newAuth()
 
-			token, _, err := svc.Login(context.Background(), tt.email, meta)
+			token, _, err := svc.Login(context.Background(), tt.email, tt.password, meta)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tt.wantErr)
 			}
@@ -140,12 +149,12 @@ func TestLoginIsBlockedAfterTooManyUnknownEmails(t *testing.T) {
 	svc, sessions, _ := newAuth()
 
 	for i := 0; i < 5; i++ {
-		if _, _, err := svc.Login(context.Background(), "nobody@corp.com", meta); !errors.Is(err, domain.ErrInvalidCredentials) {
+		if _, _, err := svc.Login(context.Background(), "nobody@corp.com", annPassword, meta); !errors.Is(err, domain.ErrInvalidCredentials) {
 			t.Fatalf("attempt %d: %v", i+1, err)
 		}
 	}
 
-	_, _, err := svc.Login(context.Background(), "nobody@corp.com", meta)
+	_, _, err := svc.Login(context.Background(), "nobody@corp.com", annPassword, meta)
 	if !errors.Is(err, domain.ErrTooManyAttempts) {
 		t.Fatalf("6th attempt: got %v, want ErrTooManyAttempts", err)
 	}
@@ -158,13 +167,13 @@ func TestLoginFailsClosedWhenRedisIsDown(t *testing.T) {
 	svc, sessions, limiter := newAuth()
 
 	limiter.err = errors.New("redis down")
-	if _, _, err := svc.Login(context.Background(), "ann@corp.com", meta); !errors.Is(err, domain.ErrUnavailable) {
+	if _, _, err := svc.Login(context.Background(), "ann@corp.com", annPassword, meta); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("limiter failure: got %v, want ErrUnavailable", err)
 	}
 
 	limiter.err = nil
 	sessions.err = errors.New("redis down")
-	if _, _, err := svc.Login(context.Background(), "ann@corp.com", meta); !errors.Is(err, domain.ErrUnavailable) {
+	if _, _, err := svc.Login(context.Background(), "ann@corp.com", annPassword, meta); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("session failure: got %v, want ErrUnavailable", err)
 	}
 }

@@ -1,13 +1,7 @@
 package domain
 
-// Every organisation gets these two groups when it is created. A user in the
-// admin group is an admin of the organisation; the member group is the basic
-// role of users created with an organisation_id.
-const (
-	AdminGroupName  = "admin"
-	MemberGroupName = "member"
-)
-
+// A group is a set of users, such as a team. It is optional: a user may have
+// none. What a group allows comes from the roles it has (see Role).
 type Group struct {
 	ID             int64  `json:"id"`
 	OrganisationID int64  `json:"organisation_id"`

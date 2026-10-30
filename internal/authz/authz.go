@@ -1,7 +1,8 @@
 // Package authz decides what the signed-in caller may do.
 //
-// Access is permission-based (see domain.Catalogue): a user belongs to one
-// group, a group is given permissions, and every endpoint requires one. A
+// Access is permission-based: a user holds roles directly and through their
+// optional group, a role is a set of permissions, and every endpoint requires
+// one. A user's permissions are the union over all those roles. A
 // permission may be scoped: "record:update:own" covers the caller's own
 // records, "record:update:org" any record of the caller's organisation.
 //
@@ -25,10 +26,10 @@ type UserGetter interface {
 	GetByID(ctx context.Context, id int64) (domain.User, error)
 }
 
-// PermissionStore returns the permissions of a group; it is the cached group
-// store in main.
+// PermissionStore returns the permissions of a user (their direct roles plus
+// the roles of their group); it is the cached user store in main.
 type PermissionStore interface {
-	Permissions(ctx context.Context, groupID int64) ([]string, error)
+	Permissions(ctx context.Context, userID int64) ([]string, error)
 }
 
 type Authorizer struct {
@@ -51,12 +52,24 @@ func (a *Authorizer) Caller(ctx context.Context) (domain.User, error) {
 }
 
 // permissionsOf returns the caller's permissions, read fresh (through the
-// cache) so a changed group or changed permissions count immediately.
+// cache) so a changed role, group or permission counts immediately. A caller
+// without an organisation has none.
 func (a *Authorizer) permissionsOf(ctx context.Context, caller domain.User) ([]string, error) {
-	if caller.GroupID == 0 {
+	if caller.OrganisationID == 0 {
 		return nil, nil
 	}
-	return a.perms.Permissions(ctx, caller.GroupID)
+	return a.perms.Permissions(ctx, caller.ID)
+}
+
+// CallerPermissions returns every permission the signed-in caller holds. It is
+// how a grant can be refused when the caller could not have made it for
+// themselves.
+func (a *Authorizer) CallerPermissions(ctx context.Context) ([]string, error) {
+	caller, err := a.Caller(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return a.permissionsOf(ctx, caller)
 }
 
 // Require allows the caller to use permission perm on something in

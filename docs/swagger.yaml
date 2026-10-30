@@ -13,6 +13,8 @@ definitions:
     properties:
       email:
         type: string
+      id:
+        type: integer
       name:
         type: string
     type: object
@@ -23,6 +25,33 @@ definitions:
       name:
         type: string
     type: object
+  domain.Permission:
+    properties:
+      action:
+        example: read
+        type: string
+      description:
+        example: Read your own records
+        type: string
+      key:
+        example: record:read:own
+        type: string
+      resource:
+        example: record
+        type: string
+      scope:
+        example: own
+        type: string
+    type: object
+  domain.Role:
+    properties:
+      id:
+        type: integer
+      name:
+        type: string
+      organisation_id:
+        type: integer
+    type: object
   domain.Task:
     properties:
       created_at:
@@ -30,6 +59,12 @@ definitions:
       description:
         type: string
       id:
+        type: integer
+      organisation_id:
+        description: |-
+          OrganisationID is the owner's organisation, stored with the record so
+          organisation-wide permissions can be checked without loading the owner.
+          It is 0 (omitted) for records of legacy users without an organisation.
         type: integer
       title:
         type: string
@@ -78,6 +113,24 @@ definitions:
         example: 1
         type: integer
     type: object
+  handler.createGroupRequest:
+    properties:
+      name:
+        example: editors
+        type: string
+      organisation_id:
+        example: 1
+        type: integer
+      role_ids:
+        description: |-
+          RoleIDs are IDs from GET /roles. Leave the field out for a group with no
+          roles.
+        example:
+        - 4
+        items:
+          type: integer
+        type: array
+    type: object
   handler.createOrganisationRequest:
     properties:
       admin_email:
@@ -85,6 +138,10 @@ definitions:
         type: string
       admin_name:
         example: Alice
+        type: string
+      admin_password:
+        description: AdminPassword is the owner's password (8 to 72 bytes).
+        example: s3cret-pass
         type: string
       name:
         example: Acme Corp
@@ -100,6 +157,21 @@ definitions:
         example: 1
         type: integer
     type: object
+  handler.createRoleRequest:
+    properties:
+      name:
+        example: developer
+        type: string
+      permissions:
+        description: |-
+          Permissions are keys from GET /permissions. Leave the field out for a
+          role with none.
+        example:
+        - record:read:org
+        items:
+          type: string
+        type: array
+    type: object
   handler.createUserRequest:
     properties:
       email:
@@ -108,9 +180,18 @@ definitions:
       name:
         example: Alice
         type: string
-      organisation_id:
-        example: 1
-        type: integer
+      password:
+        example: s3cret-pass
+        type: string
+      role_ids:
+        description: |-
+          RoleIDs are IDs from GET /roles. Leave the field out to give the user the
+          member role.
+        example:
+        - 4
+        items:
+          type: integer
+        type: array
     type: object
   handler.deleteOrganisationRequest:
     properties:
@@ -131,6 +212,9 @@ definitions:
     properties:
       email:
         example: alice@company.com
+        type: string
+      password:
+        example: s3cret-pass
         type: string
     type: object
   handler.organisationRequest:
@@ -157,14 +241,57 @@ definitions:
       title:
         type: string
     type: object
+  handler.rolePermissionsRequest:
+    properties:
+      permissions:
+        example:
+        - record:read:org
+        - user:read
+        items:
+          type: string
+        type: array
+    type: object
+  handler.rolePermissionsResponse:
+    properties:
+      permissions:
+        example:
+        - record:read:org
+        - user:read
+        items:
+          type: string
+        type: array
+    type: object
+  handler.setRolesRequest:
+    properties:
+      role_ids:
+        example:
+        - 4
+        - 5
+        items:
+          type: integer
+        type: array
+    type: object
+  handler.updateRoleRequest:
+    properties:
+      name:
+        example: developer
+        type: string
+    type: object
   handler.updateUserRequest:
     properties:
-      email:
-        example: alice@company.com
-        type: string
       name:
         example: Alice
         type: string
+    type: object
+  handler.userPermissionsResponse:
+    properties:
+      permissions:
+        example:
+        - record:read:own
+        - user:read
+        items:
+          type: string
+        type: array
     type: object
   util.ErrorResponse:
     properties:
@@ -181,14 +308,14 @@ paths:
     post:
       consumes:
       - application/json
-      description: 'There is no password: knowing the email of a user created with
-        POST /auth/users is enough (development only, no proof of ownership). On success,
-        sets an HttpOnly "session" cookie (SameSite=Strict) that the browser sends
-        on later requests, and returns the user. Accounts can only sign in with the
-        method they were created with (403 for google/github accounts). An unknown
-        email returns 401. After 5 failed attempts per email and IP, 429 for 15 minutes.'
+      description: Checks the email and password; a wrong password and an unknown
+        email both return 401 "invalid email or password". On success, sets an HttpOnly
+        "session" cookie (SameSite=Strict) that the browser sends on later requests,
+        and returns the user. Accounts can only sign in with the method they were
+        created with (403 for google/github accounts). After 5 failed attempts per
+        email and IP, 429 for 15 minutes.
       parameters:
-      - description: Email
+      - description: Email and password
         in: body
         name: body
         required: true
@@ -221,7 +348,7 @@ paths:
           description: Service Unavailable
           schema:
             $ref: '#/definitions/util.ErrorResponse'
-      summary: Sign in with an email
+      summary: Sign in with an email and password
       tags:
       - auth
   /auth/logout:
@@ -246,10 +373,12 @@ paths:
       consumes:
       - application/json
       description: 'Needs no session. Creates the organisation (name unique, ignoring
-        case) with an "admin" and a "member" group, and its first admin user from
-        admin_name and admin_email, in one step: the email must not be registered
-        yet (409), and nothing is created if any part fails. Personal email providers
-        (gmail, yahoo, ...) are rejected. The admin signs in with POST /auth/login.'
+        case) with its four built-in roles (owner, admin, member, guest) and its first
+        user from admin_name, admin_email and admin_password (8 to 72 bytes), who
+        gets the owner role, in one step: the email must not be registered yet (409),
+        and nothing is created if any part fails. Personal email providers (gmail,
+        yahoo, ...) are rejected. The owner signs in with POST /auth/login using the
+        email and password.'
       parameters:
       - description: Organisation and its admin
         in: body
@@ -283,10 +412,13 @@ paths:
     post:
       consumes:
       - application/json
-      description: 'Needs no session. organisation_id is required: the user gets the
-        basic "member" role in that organisation (404 if it doesn''t exist). Returns
-        the created user. There is no password; the user signs in with POST /auth/login
-        using the email. Personal email providers (gmail, yahoo, ...) are rejected.'
+      description: Requires a session and the user:assign_group permission (admins).
+        The user is added to your own organisation with the member role (or the role_ids
+        you give, which needs role:assign and permissions you hold yourself) and no
+        group; there is no way to join an organisation without an admin. Returns the
+        created user. A password is required (8 to 72 bytes); the user signs in with
+        POST /auth/login using the email and password. Personal email providers (gmail,
+        yahoo, ...) are rejected.
       parameters:
       - description: User details
         in: body
@@ -303,6 +435,14 @@ paths:
             $ref: '#/definitions/domain.User'
         "400":
           description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
           schema:
             $ref: '#/definitions/util.ErrorResponse'
         "404":
@@ -357,15 +497,18 @@ paths:
     post:
       consumes:
       - application/json
-      description: Returns the new group, including its ID. Names are lower-cased,
-        must start with a letter, and are unique within the organisation.
+      description: Needs group:create. Returns the new group, including its ID. Names
+        are lower-cased, must start with a letter, and are unique within the organisation.
+        role_ids (IDs from GET /roles) give the group its roles and need role:assign;
+        without them the group has none, and its members only get what their own roles
+        allow.
       parameters:
       - description: Group to create
         in: body
         name: body
         required: true
         schema:
-          $ref: '#/definitions/handler.groupRequest'
+          $ref: '#/definitions/handler.createGroupRequest'
       produces:
       - application/json
       responses:
@@ -375,6 +518,10 @@ paths:
             $ref: '#/definitions/domain.Group'
         "400":
           description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
           schema:
             $ref: '#/definitions/util.ErrorResponse'
         "404":
@@ -495,6 +642,91 @@ paths:
           schema:
             $ref: '#/definitions/util.ErrorResponse'
       summary: Update a group
+      tags:
+      - groups
+  /groups/{id}/roles:
+    get:
+      description: Needs group:read. Every member of the group gets what these roles
+        allow, on top of their own roles.
+      parameters:
+      - description: Group ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Role'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List the roles of a group
+      tags:
+      - groups
+    put:
+      consumes:
+      - application/json
+      description: Needs role:assign. Replaces the group's roles with the given role
+        IDs (404 for a role that does not exist in the organisation). You can only
+        add or remove roles whose permissions you hold yourself (403 otherwise). Takes
+        effect for the members on their next request.
+      parameters:
+      - description: Group ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New roles
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.setRolesRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Role'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Change the roles of a group
       tags:
       - groups
   /groups/{id}/users:
@@ -665,16 +897,51 @@ paths:
       summary: List all organisations
       tags:
       - organisations
+  /permissions:
+    get:
+      description: Needs role:read. Returns the permissions a role can be given, with
+        a description and the resource they belong to.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Permission'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List every permission
+      tags:
+      - roles
   /records:
     get:
-      description: Returns only the records that belong to the given user (an empty
-        list if they have none).
+      description: 'With user_id: that user''s records (record:read:own for yourself,
+        record:read:org for others). With scope=org: every record of your organisation
+        (needs record:read:org). With neither: your own records. An empty list if
+        there are none.'
       parameters:
       - description: User ID
         in: query
         name: user_id
-        required: true
         type: integer
+      - description: Use org for every record of your organisation
+        enum:
+        - org
+        in: query
+        name: scope
+        type: string
       produces:
       - application/json
       responses:
@@ -688,6 +955,10 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
         "404":
           description: Not Found
           schema:
@@ -696,7 +967,7 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/util.ErrorResponse'
-      summary: List the records of a user
+      summary: List records
       tags:
       - records
     post:
@@ -827,6 +1098,303 @@ paths:
       summary: Update a record
       tags:
       - records
+  /roles:
+    get:
+      description: Needs role:read. Includes the four built-in roles (owner, admin,
+        member, guest).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Role'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List the roles of your organisation
+      tags:
+      - roles
+    post:
+      consumes:
+      - application/json
+      description: Needs role:create. Creates a role in your own organisation. permissions
+        (keys from GET /permissions) are what the role allows; you can only give permissions
+        you hold yourself (403 otherwise, 400 for an unknown key). Names are lower-cased,
+        must start with a letter, and are unique within the organisation (409).
+      parameters:
+      - description: Role to create
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.createRoleRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/domain.Role'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Create a role
+      tags:
+      - roles
+  /roles/{id}:
+    delete:
+      description: Needs role:delete. Fails with 409 while a user or group still has
+        the role, and the built-in roles cannot be deleted (400).
+      parameters:
+      - description: Role ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Delete a role
+      tags:
+      - roles
+    get:
+      description: Needs role:read.
+      parameters:
+      - description: Role ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Role'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Get a role by ID
+      tags:
+      - roles
+    put:
+      consumes:
+      - application/json
+      description: Needs role:update. The built-in roles cannot be renamed (400).
+      parameters:
+      - description: Role ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New name
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.updateRoleRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Role'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Rename a role
+      tags:
+      - roles
+  /roles/{id}/permissions:
+    get:
+      description: Needs role:read. Returns the permission keys of the role.
+      parameters:
+      - description: Role ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.rolePermissionsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List what a role allows
+      tags:
+      - roles
+    put:
+      consumes:
+      - application/json
+      description: Needs role:update. Replaces the role's permissions with the given
+        keys from GET /permissions (400 for an unknown key). You can only add or remove
+        permissions you hold yourself (403 otherwise), and the built-in roles cannot
+        be changed (400). Takes effect for everyone who has the role on their next
+        request.
+      parameters:
+      - description: Role ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New permissions
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.rolePermissionsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.rolePermissionsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Change what a role allows
+      tags:
+      - roles
+  /users:
+    get:
+      description: Needs user:read. Returns every user of your own organisation, oldest
+        first, including those without a group.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.User'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List the users of your organisation
+      tags:
+      - users
   /users/{id}:
     delete:
       description: Fails with 409 while the user still has records; delete those first.
@@ -890,8 +1458,10 @@ paths:
     put:
       consumes:
       - application/json
-      description: Changes the name and email (work email only). The group is changed
-        with the assign-group endpoint.
+      description: 'Changes the name only: the email is the login identity and cannot
+        be changed (an email field is rejected). Needs user:update:own for yourself,
+        user:update:org for others. The group is changed with the assign-group endpoint
+        and the roles with the roles endpoint.'
       parameters:
       - description: User ID
         in: path
@@ -934,8 +1504,11 @@ paths:
     put:
       consumes:
       - application/json
-      description: The group must exist (404) and belong to the organisation stored
-        on the user (400 otherwise).
+      description: Needs user:assign_group. The group must exist (404) and belong
+        to the organisation stored on the user (400 otherwise). A group_id of 0 takes
+        the user out of their group. The user gets the roles of the new group and
+        loses those of the old one, so you must hold the permissions of every role
+        that changes (403 otherwise).
       parameters:
       - description: User ID
         in: path
@@ -968,6 +1541,132 @@ paths:
           schema:
             $ref: '#/definitions/util.ErrorResponse'
       summary: Assign a group to a user
+      tags:
+      - users
+  /users/{id}/permissions:
+    get:
+      description: 'Needs role:read, except for yourself. Returns every permission
+        the user has: the union of their own roles and the roles of their group.'
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.userPermissionsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List what a user may do
+      tags:
+      - users
+  /users/{id}/roles:
+    get:
+      description: Needs role:read, except for yourself. These are the roles given
+        to the user themselves; the roles their group gives are listed under GET /groups/{id}/roles.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Role'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: List the roles a user holds directly
+      tags:
+      - users
+    put:
+      consumes:
+      - application/json
+      description: Needs role:assign. Replaces the roles the user holds directly with
+        the given role IDs (404 for a role that does not exist in the organisation).
+        You can only add or remove roles whose permissions you hold yourself (403
+        otherwise), so only an owner can give or take the owner role, and an organisation
+        always keeps at least one owner (409). Takes effect on the user's next request.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: New roles
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.setRolesRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/domain.Role'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/util.ErrorResponse'
+      summary: Change the roles of a user
       tags:
       - users
 swagger: "2.0"

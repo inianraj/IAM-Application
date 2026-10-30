@@ -249,10 +249,12 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, domain.ErrInvalidUserID),
 		errors.Is(err, domain.ErrInvalidGroup),
 		errors.Is(err, domain.ErrInvalidGroupID),
+		errors.Is(err, domain.ErrInvalidRole),
+		errors.Is(err, domain.ErrInvalidRoleID),
 		errors.Is(err, domain.ErrInvalidOrganisation),
 		errors.Is(err, domain.ErrInvalidOrganisationID),
 		errors.Is(err, domain.ErrGroupNotInOrganisation),
-		errors.Is(err, domain.ErrBuiltinGroup):
+		errors.Is(err, domain.ErrBuiltinRole):
 		util.Error(w, http.StatusBadRequest, err.Error())
 
 	case errors.Is(err, domain.ErrTaskNotFound):
@@ -260,12 +262,16 @@ func writeServiceError(w http.ResponseWriter, err error) {
 
 	case errors.Is(err, domain.ErrUserNotFound),
 		errors.Is(err, domain.ErrGroupNotFound),
+		errors.Is(err, domain.ErrRoleNotFound),
 		errors.Is(err, domain.ErrOrganisationNotFound):
 		util.Error(w, http.StatusNotFound, err.Error())
 
 	case errors.Is(err, domain.ErrEmailTaken),
 		errors.Is(err, domain.ErrGroupExists),
 		errors.Is(err, domain.ErrGroupInUse),
+		errors.Is(err, domain.ErrRoleExists),
+		errors.Is(err, domain.ErrRoleInUse),
+		errors.Is(err, domain.ErrLastOwner),
 		errors.Is(err, domain.ErrUserInUse),
 		errors.Is(err, domain.ErrOrganisationExists),
 		errors.Is(err, domain.ErrOrganisationInUse):

@@ -1,45 +1,16 @@
 import { h, field, notify } from "../dom.js";
 import { get, post, put, del } from "../api.js";
 import { state, can } from "../state.js";
+import { rolePicker } from "../pickers.js";
 
-const BUILTIN = ["admin", "member"];
-
-// A list of checkboxes for the permissions, grouped by resource. selected() returns
-// the checked keys.
-function permissionPicker(catalogue, selectedKeys) {
-  const boxes = new Map();
-  const resources = new Map();
-
-  for (const permission of catalogue) {
-    if (!resources.has(permission.resource)) resources.set(permission.resource, []);
-    resources.get(permission.resource).push(permission);
-  }
-
-  const element = h("div", { class: "permissions" });
-  for (const [resource, permissions] of resources) {
-    element.append(
-      h(
-        "fieldset",
-        null,
-        h("legend", null, resource),
-        permissions.map((permission) => {
-          const box = h("input", { type: "checkbox", checked: selectedKeys.has(permission.key) });
-          boxes.set(permission.key, box);
-          return h("label", { class: "inline" }, box, " ", h("code", null, permission.key), " ", h("span", { class: "muted" }, permission.description));
-        }),
-      ),
-    );
-  }
-
-  return { element, selected: () => [...boxes].filter(([, box]) => box.checked).map(([key]) => key) };
-}
-
+// A group is a team. It is optional for a user, and gives its members the
+// roles it has on top of the roles they hold themselves.
 export async function groupsView(container) {
   const organisationId = state.user.organisation_id;
-  const canManage = can("group:manage_permissions");
+  const canAssign = can("role:assign") && can("role:read");
 
-  // Only admins can read the catalogue (GET /permissions).
-  const catalogue = canManage ? await get("/permissions") : [];
+  // The roles a group can be given (GET /roles needs role:read).
+  const roles = canAssign ? await get("/roles") : [];
   const list = h("div");
 
   container.append(h("h2", null, "Groups"), createForm(), list);
@@ -52,27 +23,22 @@ export async function groupsView(container) {
   function createForm() {
     if (!can("group:create")) return null;
 
-    const nameInput = field("Group name", { name: "name", required: true, maxlength: 50, placeholder: "e.g. auditors" });
-    const picker = h("div");
-    const form = h("form", { class: "card" }, h("h3", null, "New group"), nameInput, picker);
+    const nameInput = field("Group name", { name: "name", required: true, maxlength: 50, placeholder: "e.g. engineering" });
+    const picker = canAssign ? rolePicker(roles, new Set()) : null;
+    const form = h(
+      "form",
+      { class: "card" },
+      h("h3", null, "New group"),
+      nameInput,
+      picker ? h("p", { class: "muted" }, "Roles the members of the group get:") : null,
+      picker ? picker.element : null,
+      h("button", { type: "submit", class: "primary" }, "Create group"),
+    );
 
-    if (canManage) {
-      // Start from what the built-in member group may do.
-      picker.append(h("p", { class: "muted" }, "Choose what the group may do:"));
-      loadMemberDefaults().then((defaults) => {
-        const chooser = permissionPicker(catalogue, defaults);
-        picker.append(chooser.element);
-        picker.chooser = chooser;
-      });
-    } else {
-      picker.append(h("p", { class: "muted" }, "The group starts with the same permissions as members."));
-    }
-
-    form.append(h("button", { type: "submit", class: "primary" }, "Create group"));
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = { organisation_id: organisationId, name: new FormData(form).get("name") };
-      if (canManage && picker.chooser) body.permissions = picker.chooser.selected();
+      if (picker) body.role_ids = picker.selected();
 
       try {
         await post("/groups", body);
@@ -87,19 +53,7 @@ export async function groupsView(container) {
     return form;
   }
 
-  async function loadMemberDefaults() {
-    try {
-      const groups = await get(`/groups?organisation_id=${organisationId}`);
-      const member = groups.find((g) => g.name === "member");
-      if (member) return new Set((await get(`/groups/${member.id}/permissions`)).permissions);
-    } catch {
-      // start with nothing checked
-    }
-    return new Set();
-  }
-
   function groupCard(group) {
-    const builtin = BUILTIN.includes(group.name);
     const details = h("div");
 
     const card = h(
@@ -108,20 +62,20 @@ export async function groupsView(container) {
       h(
         "div",
         { class: "row" },
-        h("h3", null, group.name, " ", builtin ? h("span", { class: "badge" }, "built-in") : null),
+        h("h3", null, group.name),
         h(
           "div",
           { class: "actions" },
-          h("button", { onclick: () => togglePermissions() }, "Permissions"),
-          can("group:update") && !builtin ? h("button", { onclick: rename }, "Rename") : null,
-          can("group:delete") && !builtin ? h("button", { class: "danger", onclick: remove }, "Delete") : null,
+          h("button", { onclick: () => toggleRoles() }, "Roles"),
+          can("group:update") ? h("button", { onclick: rename }, "Rename") : null,
+          can("group:delete") ? h("button", { class: "danger", onclick: remove }, "Delete") : null,
         ),
       ),
       details,
     );
 
     let open = false;
-    async function togglePermissions() {
+    async function toggleRoles() {
       open = !open;
       if (!open) {
         details.replaceChildren();
@@ -129,10 +83,10 @@ export async function groupsView(container) {
       }
 
       try {
-        const current = new Set((await get(`/groups/${group.id}/permissions`)).permissions);
+        const current = await get(`/groups/${group.id}/roles`);
 
-        if (canManage && !builtin) {
-          const picker = permissionPicker(catalogue, current);
+        if (canAssign) {
+          const picker = rolePicker(roles, new Set(current.map((r) => r.id)));
           details.replaceChildren(
             picker.element,
             h(
@@ -141,22 +95,21 @@ export async function groupsView(container) {
                 class: "primary",
                 onclick: async () => {
                   try {
-                    await put(`/groups/${group.id}/permissions`, { permissions: picker.selected() });
-                    notify(`Permissions of "${group.name}" saved. They apply on the members' next request.`);
+                    await put(`/groups/${group.id}/roles`, { role_ids: picker.selected() });
+                    notify(`Roles of "${group.name}" saved. They apply on the members' next request.`);
                   } catch (err) {
                     notify(err.message, true);
                   }
                 },
               },
-              "Save permissions",
+              "Save roles",
             ),
           );
         } else {
           details.replaceChildren(
-            current.size === 0
-              ? h("p", { class: "muted" }, "No permissions.")
-              : h("ul", { class: "keys" }, [...current].sort().map((key) => h("li", null, h("code", null, key)))),
-            builtin ? h("p", { class: "muted" }, "Built-in groups cannot be changed.") : null,
+            current.length === 0
+              ? h("p", { class: "muted" }, "No roles.")
+              : h("ul", { class: "keys" }, current.map((r) => h("li", null, h("code", null, r.name)))),
           );
         }
       } catch (err) {

@@ -6,14 +6,16 @@ package domain
 // (groups, the organisation) have no scope.
 //
 // The permissions table is the only list of permissions: migration 011 seeds
-// it, a new permission is added by a new migration, and group_permissions can
-// only reference its rows. The code holds just the names of the permissions its
+// it (migration 012 swapped group:manage_permissions for the role ones), a new
+// permission is added by a new migration, and role_permissions can only
+// reference its rows. The code holds just the names of the permissions its
 // checks require, which are the constants below and ScopedKey.
 const (
 	ResourceRecord       = "record"
 	ResourceUser         = "user"
 	ResourceGroup        = "group"
 	ResourceOrganisation = "organisation"
+	ResourceRole         = "role"
 
 	ActionCreate = "create"
 	ActionRead   = "read"
@@ -33,7 +35,11 @@ const (
 	PermGroupRead         = "group:read"
 	PermGroupUpdate       = "group:update"
 	PermGroupDelete       = "group:delete"
-	PermGroupManagePerms  = "group:manage_permissions"
+	PermRoleCreate        = "role:create"
+	PermRoleRead          = "role:read"
+	PermRoleUpdate        = "role:update"
+	PermRoleDelete        = "role:delete"
+	PermRoleAssign        = "role:assign"
 	PermOrganisationRead  = "organisation:read"
 	PermOrganisationEdit  = "organisation:update"
 	PermOrganisationErase = "organisation:delete"
@@ -53,10 +59,9 @@ type Permission struct {
 	Description string `json:"description" example:"Read your own records"`
 }
 
-// MemberPermissions are what the built-in member group has, and what a new
-// group gets when none are given: manage your own records, read the
-// organisation's users and groups, change your own name. (The built-in admin
-// group gets every row of the permissions table.)
+// MemberPermissions are what the built-in member role has, and so what a user
+// gets by default: manage your own records, read the organisation's users and
+// groups, change your own name.
 func MemberPermissions() []string {
 	return []string{
 		ScopedKey(ResourceRecord, ActionCreate, ScopeOwn),
@@ -70,11 +75,13 @@ func MemberPermissions() []string {
 	}
 }
 
-// IsBuiltinGroup reports whether name is one of the two groups every
-// organisation gets. Their names and permissions cannot be changed, and they
-// cannot be deleted, so an organisation can never lock itself out.
-func IsBuiltinGroup(name string) bool {
-	return name == AdminGroupName || name == MemberGroupName
+// GuestPermissions are what the built-in guest role has: read your own
+// records and see the organisation.
+func GuestPermissions() []string {
+	return []string{
+		ScopedKey(ResourceRecord, ActionRead, ScopeOwn),
+		PermOrganisationRead,
+	}
 }
 
 // UniquePermissions returns the keys without duplicates, in first-seen order

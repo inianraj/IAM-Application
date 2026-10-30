@@ -3,8 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
-	"slices"
 	"testing"
 
 	"crud/internal/auth"
@@ -20,7 +18,7 @@ type directory struct {
 }
 
 func (d directory) userGetter() authz.UserGetter           { return userLookup(d.users) }
-func (d directory) permissionStore() authz.PermissionStore { return permLookup(d.groups) }
+func (d directory) permissionStore() authz.PermissionStore { return permLookup{d} }
 
 type userLookup map[int64]domain.User
 
@@ -31,10 +29,11 @@ func (m userLookup) GetByID(_ context.Context, id int64) (domain.User, error) {
 	return domain.User{}, domain.ErrUserNotFound
 }
 
-type permLookup map[int64][]string
+// permLookup resolves a user's permissions through their group, like the real store.
+type permLookup struct{ d directory }
 
-func (m permLookup) Permissions(_ context.Context, groupID int64) ([]string, error) {
-	return m[groupID], nil
+func (m permLookup) Permissions(_ context.Context, userID int64) ([]string, error) {
+	return m.d.groups[m.d.users[userID].GroupID], nil
 }
 
 var dir = directory{
@@ -43,6 +42,7 @@ var dir = directory{
 		2:  {ID: 2, OrganisationID: 1, GroupID: 101},
 		3:  {ID: 3, OrganisationID: 1, GroupID: 101},
 		4:  {ID: 4, OrganisationID: 1, GroupID: 102}, // auditor: record:read:org only
+		5:  {ID: 5, OrganisationID: 1, GroupID: 103}, // admin without organisation:delete
 		10: {ID: 10, OrganisationID: 2, GroupID: 200},
 		20: {ID: 20}, // no organisation
 		21: {ID: 21}, // no organisation
@@ -51,19 +51,32 @@ var dir = directory{
 		100: allPermissions,
 		101: domain.MemberPermissions(),
 		102: {"record:read:org"},
+		103: withoutErase(allPermissions),
 		200: allPermissions,
 	},
 }
 
 var az = authz.New(dir.userGetter(), dir.permissionStore())
 
-// allPermissions is what an admin group holds: every row migration 011 seeds.
+// allPermissions is what an admin group holds: every permission the migrations seed.
 var allPermissions = []string{
 	"record:create:own", "record:create:org", "record:read:own", "record:read:org",
 	"record:update:own", "record:update:org", "record:delete:own", "record:delete:org",
 	"user:read", "user:update:own", "user:update:org", "user:delete", "user:assign_group",
-	"group:create", "group:read", "group:update", "group:delete", "group:manage_permissions",
+	"group:create", "group:read", "group:update", "group:delete",
+	"role:create", "role:read", "role:update", "role:delete", "role:assign",
 	"organisation:read", "organisation:update", "organisation:delete",
+}
+
+// withoutErase is what an admin has: everything except deleting the organisation.
+func withoutErase(all []string) []string {
+	var out []string
+	for _, p := range all {
+		if p != domain.PermOrganisationErase {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func as(userID int64) context.Context {
@@ -177,37 +190,26 @@ func TestRecordAuthorization(t *testing.T) {
 
 // --- groups ---
 
-// Groups: 100 is org 1's built-in admin, 101 a custom group, 200 org 2's admin.
+// Groups: 100 and 101 are org 1 groups, 200 is org 2 group.
 var testGroups = map[int64]domain.Group{
 	100: {ID: 100, OrganisationID: 1, Name: "admin"},
 	101: {ID: 101, OrganisationID: 1, Name: "staff"},
+	102: {ID: 102, OrganisationID: 1, Name: "auditors"},
+	103: {ID: 103, OrganisationID: 1, Name: "admins"},
 	200: {ID: 200, OrganisationID: 2, Name: "admin"},
-}
-
-// knownPermissions mimics the database: only keys in the permissions table can
-// be stored, anything else is rejected as an invalid group.
-func knownPermissions(keys []string) error {
-	for _, k := range keys {
-		if !slices.Contains(allPermissions, k) {
-			return fmt.Errorf("%w: unknown permission %q", domain.ErrInvalidGroup, k)
-		}
-	}
-	return nil
 }
 
 type groupStore struct {
 	groups      map[int64]domain.Group
+	roles       map[int64][]domain.Role // roles each group has
 	writes      int
-	createdWith []string
-	setWith     []string
+	createdWith []int64
+	setRolesTo  []int64
 }
 
-func (g *groupStore) Create(_ context.Context, grp domain.Group, permissions []string) (domain.Group, error) {
-	if err := knownPermissions(permissions); err != nil {
-		return domain.Group{}, err
-	}
+func (g *groupStore) Create(_ context.Context, grp domain.Group, roleIDs []int64) (domain.Group, error) {
 	g.writes++
-	g.createdWith = permissions
+	g.createdWith = roleIDs
 	grp.ID = 300
 	return grp, nil
 }
@@ -228,19 +230,73 @@ func (g *groupStore) Delete(context.Context, int64) error { g.writes++; return n
 func (g *groupStore) ListMembers(context.Context, int64) ([]domain.GroupMember, error) {
 	return []domain.GroupMember{}, nil
 }
-func (g *groupStore) Permissions(_ context.Context, id int64) ([]string, error) {
-	return dir.groups[id], nil
+func (g *groupStore) Roles(_ context.Context, id int64) ([]domain.Role, error) {
+	return g.roles[id], nil
 }
-func (g *groupStore) SetPermissions(_ context.Context, _ int64, permissions []string) error {
-	if err := knownPermissions(permissions); err != nil {
-		return err
-	}
+func (g *groupStore) SetRoles(_ context.Context, _ int64, roleIDs []int64) error {
 	g.writes++
-	g.setWith = permissions
+	g.setRolesTo = roleIDs
 	return nil
 }
-func (g *groupStore) ListPermissions(context.Context) ([]domain.Permission, error) {
-	return []domain.Permission{{Key: "user:read", Resource: "user", Action: "read", Description: "Read users"}}, nil
+
+// Roles of org 1: 10 owner, 11 admin, 12 member (built in), 13 auditor (custom).
+// Role 20 is org 2's admin.
+var testRoles = map[int64]domain.Role{
+	10: {ID: 10, OrganisationID: 1, Name: "owner"},
+	11: {ID: 11, OrganisationID: 1, Name: "admin"},
+	12: {ID: 12, OrganisationID: 1, Name: "member"},
+	13: {ID: 13, OrganisationID: 1, Name: "auditor"},
+	20: {ID: 20, OrganisationID: 2, Name: "admin"},
+}
+
+var testRolePermissions = map[int64][]string{
+	10: allPermissions,
+	11: withoutErase(allPermissions),
+	12: domain.MemberPermissions(),
+	13: {"record:read:org"},
+	20: allPermissions,
+}
+
+// roleStore is an in-memory RoleStore (and RoleReader) over testRoles.
+type roleStore struct {
+	writes int
+	setTo  []string
+}
+
+func (r *roleStore) Create(_ context.Context, role domain.Role, _ []string) (domain.Role, error) {
+	r.writes++
+	role.ID = 30
+	return role, nil
+}
+func (r *roleStore) GetByID(_ context.Context, id int64) (domain.Role, error) {
+	if role, ok := testRoles[id]; ok {
+		return role, nil
+	}
+	return domain.Role{}, domain.ErrRoleNotFound
+}
+func (r *roleStore) ListByOrganisation(context.Context, int64) ([]domain.Role, error) {
+	return []domain.Role{}, nil
+}
+func (r *roleStore) Update(_ context.Context, role domain.Role) (domain.Role, error) {
+	r.writes++
+	return role, nil
+}
+func (r *roleStore) Delete(context.Context, int64) error { r.writes++; return nil }
+func (r *roleStore) Permissions(_ context.Context, id int64) ([]string, error) {
+	return testRolePermissions[id], nil
+}
+func (r *roleStore) SetPermissions(_ context.Context, _ int64, permissions []string) error {
+	r.writes++
+	r.setTo = permissions
+	return nil
+}
+func (r *roleStore) HolderIDs(context.Context, int64) ([]int64, error) { return nil, nil }
+func (r *roleStore) ListPermissions(context.Context) ([]domain.Permission, error) {
+	list := make([]domain.Permission, 0, len(allPermissions))
+	for _, k := range allPermissions {
+		list = append(list, domain.Permission{Key: k})
+	}
+	return list, nil
 }
 
 func TestGroupAuthorization(t *testing.T) {
@@ -287,50 +343,58 @@ func TestGroupAuthorization(t *testing.T) {
 		{"admin deletes a group", 1, func(s *GroupService, c context.Context) error { return s.Delete(c, 101) }, nil},
 		{"member deletes a group", 2, func(s *GroupService, c context.Context) error { return s.Delete(c, 101) }, domain.ErrForbidden},
 		{"admin deletes another org's group", 1, func(s *GroupService, c context.Context) error { return s.Delete(c, 200) }, domain.ErrGroupNotFound},
-		{"admin renames the built-in admin group", 1, func(s *GroupService, c context.Context) error {
-			_, e := s.Update(c, domain.Group{ID: 100, OrganisationID: 1, Name: "boss"})
-			return e
-		}, domain.ErrBuiltinGroup},
-		{"admin deletes the built-in admin group", 1, func(s *GroupService, c context.Context) error { return s.Delete(c, 100) }, domain.ErrBuiltinGroup},
-		{"member reads a group's permissions", 2, func(s *GroupService, c context.Context) error { _, e := s.GetPermissions(c, 101); return e }, nil},
-		{"member reads another org's group permissions", 2, func(s *GroupService, c context.Context) error { _, e := s.GetPermissions(c, 200); return e }, domain.ErrGroupNotFound},
-		{"admin sets a group's permissions", 1, func(s *GroupService, c context.Context) error {
-			_, e := s.SetPermissions(c, 101, []string{"record:read:org", "record:read:org"})
+		{"member reads a group's roles", 2, func(s *GroupService, c context.Context) error { _, e := s.GetRoles(c, 101); return e }, nil},
+		{"member reads another org's group roles", 2, func(s *GroupService, c context.Context) error { _, e := s.GetRoles(c, 200); return e }, domain.ErrGroupNotFound},
+		{"admin sets a group's roles", 1, func(s *GroupService, c context.Context) error {
+			_, e := s.SetRoles(c, 101, []int64{13, 13})
 			return e
 		}, nil},
-		{"member sets a group's permissions", 2, func(s *GroupService, c context.Context) error {
-			_, e := s.SetPermissions(c, 101, []string{"record:read:org"})
+		{"member sets a group's roles", 2, func(s *GroupService, c context.Context) error {
+			_, e := s.SetRoles(c, 101, []int64{13})
 			return e
 		}, domain.ErrForbidden},
-		{"admin sets permissions of the built-in member group", 1, func(s *GroupService, c context.Context) error {
-			_, e := s.SetPermissions(c, 100, []string{"record:read:org"})
-			return e
-		}, domain.ErrBuiltinGroup},
-		{"admin sets an unknown permission", 1, func(s *GroupService, c context.Context) error {
-			_, e := s.SetPermissions(c, 101, []string{"record:fly:org"})
-			return e
-		}, domain.ErrInvalidGroup},
 		{"admin sets another org's group", 1, func(s *GroupService, c context.Context) error {
-			_, e := s.SetPermissions(c, 200, []string{"record:read:org"})
+			_, e := s.SetRoles(c, 200, []int64{13})
 			return e
 		}, domain.ErrGroupNotFound},
-		{"admin lists the permission catalogue", 1, func(s *GroupService, c context.Context) error { _, e := s.ListPermissions(c); return e }, nil},
-		{"member lists the permission catalogue", 2, func(s *GroupService, c context.Context) error { _, e := s.ListPermissions(c); return e }, domain.ErrForbidden},
-		{"user without an organisation lists the catalogue", 20, func(s *GroupService, c context.Context) error { _, e := s.ListPermissions(c); return e }, domain.ErrOrganisationNotFound},
-		{"admin creates a group with chosen permissions", 1, func(s *GroupService, c context.Context) error {
-			_, e := s.Create(c, domain.Group{OrganisationID: 1, Name: "auditors"}, []string{"record:read:org"})
+		{"admin sets a role of another org", 1, func(s *GroupService, c context.Context) error {
+			_, e := s.SetRoles(c, 101, []int64{20})
+			return e
+		}, domain.ErrRoleNotFound},
+		{"admin sets an unknown role", 1, func(s *GroupService, c context.Context) error {
+			_, e := s.SetRoles(c, 101, []int64{99})
+			return e
+		}, domain.ErrRoleNotFound},
+		{"admin sets an invalid role id", 1, func(s *GroupService, c context.Context) error {
+			_, e := s.SetRoles(c, 101, []int64{0})
+			return e
+		}, domain.ErrInvalidRoleID},
+		{"admin without organisation:delete cannot give the owner role", 5, func(s *GroupService, c context.Context) error {
+			_, e := s.SetRoles(c, 101, []int64{10})
+			return e
+		}, domain.ErrForbidden},
+		{"owner gives the owner role to a group", 1, func(s *GroupService, c context.Context) error {
+			_, e := s.SetRoles(c, 101, []int64{10})
 			return e
 		}, nil},
-		{"admin creates a group with an unknown permission", 1, func(s *GroupService, c context.Context) error {
-			_, e := s.Create(c, domain.Group{OrganisationID: 1, Name: "auditors"}, []string{"nope"})
+		{"admin creates a group with a role", 1, func(s *GroupService, c context.Context) error {
+			_, e := s.Create(c, domain.Group{OrganisationID: 1, Name: "auditors"}, []int64{13})
 			return e
-		}, domain.ErrInvalidGroup},
+		}, nil},
+		{"auditor creates a group with a role", 4, func(s *GroupService, c context.Context) error {
+			_, e := s.Create(c, domain.Group{OrganisationID: 1, Name: "auditors"}, []int64{13})
+			return e
+		}, domain.ErrForbidden},
+		{"admin creates a group with another org's role", 1, func(s *GroupService, c context.Context) error {
+			_, e := s.Create(c, domain.Group{OrganisationID: 1, Name: "auditors"}, []int64{20})
+			return e
+		}, domain.ErrRoleNotFound},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &groupStore{groups: testGroups}
-			err := tt.op(NewGroupService(store, az), as(tt.caller))
+			err := tt.op(NewGroupService(store, &roleStore{}, az), as(tt.caller))
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
 			}
@@ -377,8 +441,8 @@ func TestUserAuthorization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := userDirStore{}
-			err := tt.op(NewUserService(store, az), as(tt.caller))
+			store := &userDirStore{}
+			err := tt.op(newUserService(store), as(tt.caller))
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
 			}
@@ -474,7 +538,7 @@ func TestOrganisationCurrentNeedsASession(t *testing.T) {
 func TestOrganisationCreateAndListArePublic(t *testing.T) {
 	svc := NewOrganisationService(&orgStore{}, az)
 
-	if _, _, err := svc.Create(context.Background(), domain.Organisation{Name: "Acme"}, domain.User{Name: "Ann", Email: "ann@corp.com"}); err != nil {
+	if _, _, err := svc.Create(context.Background(), domain.Organisation{Name: "Acme"}, domain.User{Name: "Ann", Email: "ann@corp.com", Password: "ann-pass-123"}); err != nil {
 		t.Fatalf("create without a session: %v", err)
 	}
 	if _, err := svc.List(context.Background()); err != nil {
@@ -482,16 +546,66 @@ func TestOrganisationCreateAndListArePublic(t *testing.T) {
 	}
 }
 
-// userDirStore is a UserStore backed by the shared test directory.
-type userDirStore struct{}
+// Direct roles of the test users: 1 is an owner, 5 and 2 hold admin/member.
+var testUserRoles = map[int64][]domain.Role{
+	1: {testRoles[10]},
+	2: {testRoles[12]},
+	3: {testRoles[12]},
+	5: {testRoles[11]},
+}
 
-func (userDirStore) Create(_ context.Context, u domain.User) (domain.User, error) { return u, nil }
-func (userDirStore) GetByID(_ context.Context, id int64) (domain.User, error) {
+// Roles each test group gives.
+var testGroupRoles = map[int64][]domain.Role{
+	100: {testRoles[11]},
+	101: {testRoles[12]},
+	102: {testRoles[13]},
+	103: {testRoles[11]},
+}
+
+// newUserService builds a UserService over the shared test directory.
+func newUserService(store UserStore) *UserService {
+	return NewUserService(store, &groupStore{groups: testGroups, roles: testGroupRoles}, &roleStore{}, az)
+}
+
+// userDirStore is a UserStore backed by the shared test directory. It records
+// what the service wrote.
+type userDirStore struct {
+	writes    int
+	createdBy []int64 // role ids passed to Create
+	setRoles  []int64
+}
+
+func (s *userDirStore) Create(_ context.Context, u domain.User, roleIDs []int64) (domain.User, error) {
+	s.writes++
+	s.createdBy = roleIDs
+	return u, nil
+}
+func (s *userDirStore) GetByID(_ context.Context, id int64) (domain.User, error) {
 	if u, ok := dir.users[id]; ok {
 		return u, nil
 	}
 	return domain.User{}, domain.ErrUserNotFound
 }
-func (userDirStore) Update(_ context.Context, u domain.User) (domain.User, error) { return u, nil }
-func (userDirStore) Delete(context.Context, int64) error                          { return nil }
-func (userDirStore) AssignGroup(context.Context, int64, int64) error              { return nil }
+func (s *userDirStore) ListByOrganisation(context.Context, int64) ([]domain.User, error) {
+	return []domain.User{}, nil
+}
+func (s *userDirStore) Update(_ context.Context, u domain.User) (domain.User, error) {
+	s.writes++
+	return u, nil
+}
+func (s *userDirStore) Delete(context.Context, int64) error { s.writes++; return nil }
+func (s *userDirStore) AssignGroup(context.Context, int64, int64) error {
+	s.writes++
+	return nil
+}
+func (s *userDirStore) Permissions(_ context.Context, id int64) ([]string, error) {
+	return dir.groups[dir.users[id].GroupID], nil
+}
+func (s *userDirStore) Roles(_ context.Context, id int64) ([]domain.Role, error) {
+	return testUserRoles[id], nil
+}
+func (s *userDirStore) SetRoles(_ context.Context, _ int64, roleIDs []int64) error {
+	s.writes++
+	s.setRoles = roleIDs
+	return nil
+}

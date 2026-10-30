@@ -14,6 +14,7 @@ type Handlers struct {
 	Records       *handler.RecordHandler
 	Users         *handler.UserHandler
 	Groups        *handler.GroupHandler
+	Roles         *handler.RoleHandler
 	Organisations *handler.OrganisationHandler
 
 	// Middleware wraps the whole API (origin checks, authentication). It is
@@ -43,6 +44,7 @@ func New(h Handlers) http.Handler {
 	h.Records.Register(mux)
 	h.Users.Register(mux)
 	h.Groups.Register(mux)
+	h.Roles.Register(mux)
 	h.Organisations.Register(mux)
 
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)

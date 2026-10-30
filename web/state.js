@@ -10,7 +10,8 @@ export const state = {
   permissions: new Set(),
 };
 
-// can("record:read:org"): does the user's group hold this permission? This only
+// can("record:read:org"): does the user hold this permission, through their own
+// roles or their group's? This only
 // decides what to show; the API enforces the real rules and answers 403.
 export function can(permission) {
   return state.permissions.has(permission);
@@ -40,7 +41,7 @@ export function forget() {
   state.permissions = new Set();
 }
 
-// signIn stores the user and loads their group's permissions.
+// signIn stores the user and loads their permissions.
 export async function signIn(user) {
   state.user = user;
   try {
@@ -53,13 +54,14 @@ export async function signIn(user) {
 
 export async function loadPermissions() {
   state.permissions = new Set();
-  if (!state.user.group_id) return; // a legacy user without a group has none
+  if (!state.user.organisation_id) return; // a legacy user without an organisation has none
 
   try {
-    const response = await get(`/groups/${state.user.group_id}/permissions`);
+    // The union of the user's own roles and the roles of their group.
+    const response = await get(`/users/${state.user.id}/permissions`);
     state.permissions = new Set(response.permissions);
   } catch {
-    // without group:read the user has no way to list them; show the basics only
+    // show the basics only
   }
 }
 

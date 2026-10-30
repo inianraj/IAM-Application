@@ -12,21 +12,21 @@ import (
 
 // GroupStore is the persistence contract the cache wraps (same shape as service.GroupStore).
 type GroupStore interface {
-	Create(ctx context.Context, g domain.Group, permissions []string) (domain.Group, error)
+	Create(ctx context.Context, g domain.Group, roleIDs []int64) (domain.Group, error)
 	GetByID(ctx context.Context, id int64) (domain.Group, error)
 	ListByOrganisation(ctx context.Context, organisationID int64) ([]domain.Group, error)
 	Update(ctx context.Context, g domain.Group) (domain.Group, error)
 	Delete(ctx context.Context, id int64) error
 	ListMembers(ctx context.Context, groupID int64) ([]domain.GroupMember, error)
 
-	Permissions(ctx context.Context, groupID int64) ([]string, error)
-	SetPermissions(ctx context.Context, groupID int64, permissions []string) error
-	ListPermissions(ctx context.Context) ([]domain.Permission, error)
+	Roles(ctx context.Context, groupID int64) ([]domain.Role, error)
+	SetRoles(ctx context.Context, groupID int64, roleIDs []int64) error
 }
 
-// CachedGroupStore caches GetByID, the per-organisation list, the member
-// list and the permissions of a group. User writes that change a member list are invalidated in
-// CachedUserStore.
+// CachedGroupStore caches GetByID, the per-organisation list and the member
+// list of a group. User writes that change a member list are invalidated in
+// CachedUserStore. A change to a group's roles drops the cached permissions of
+// its members.
 type CachedGroupStore struct {
 	jsonCache
 	next GroupStore
@@ -78,8 +78,8 @@ func (s *CachedGroupStore) ListMembers(ctx context.Context, groupID int64) ([]do
 	return members, nil
 }
 
-func (s *CachedGroupStore) Create(ctx context.Context, g domain.Group, permissions []string) (domain.Group, error) {
-	created, err := s.next.Create(ctx, g, permissions)
+func (s *CachedGroupStore) Create(ctx context.Context, g domain.Group, roleIDs []int64) (domain.Group, error) {
+	created, err := s.next.Create(ctx, g, roleIDs)
 	if err != nil {
 		return domain.Group{}, err
 	}
@@ -111,34 +111,33 @@ func (s *CachedGroupStore) Delete(ctx context.Context, id int64) error {
 	if err := s.next.Delete(ctx, id); err != nil {
 		return err
 	}
-	s.invalidate(ctx, groupKey(id), groupMembersKey(id), groupPermissionsKey(id), orgGroupsKey(existing.OrganisationID))
+	s.invalidate(ctx, groupKey(id), groupMembersKey(id), orgGroupsKey(existing.OrganisationID))
 	return nil
 }
 
-// Permissions is what authorization reads on every request, so it is cached.
-func (s *CachedGroupStore) Permissions(ctx context.Context, groupID int64) ([]string, error) {
-	var perms []string
-	if s.get(ctx, groupPermissionsKey(groupID), &perms) && perms != nil {
-		return perms, nil
-	}
-
-	perms, err := s.next.Permissions(ctx, groupID)
-	if err != nil {
-		return nil, err
-	}
-	s.set(ctx, groupPermissionsKey(groupID), perms)
-	return perms, nil
+func (s *CachedGroupStore) Roles(ctx context.Context, groupID int64) ([]domain.Role, error) {
+	return s.next.Roles(ctx, groupID)
 }
 
-func (s *CachedGroupStore) SetPermissions(ctx context.Context, groupID int64, permissions []string) error {
-	if err := s.next.SetPermissions(ctx, groupID, permissions); err != nil {
+// SetRoles changes what every member of the group may do, so their cached
+// permissions are dropped. The members are listed from Postgres (not the
+// cache) after the change; if that fails the TTL is the backstop.
+func (s *CachedGroupStore) SetRoles(ctx context.Context, groupID int64, roleIDs []int64) error {
+	if err := s.next.SetRoles(ctx, groupID, roleIDs); err != nil {
 		return err
 	}
-	s.invalidate(ctx, groupPermissionsKey(groupID))
-	return nil
-}
 
-// ListPermissions is the permission catalogue; it is read rarely, so it is not cached.
-func (s *CachedGroupStore) ListPermissions(ctx context.Context) ([]domain.Permission, error) {
-	return s.next.ListPermissions(ctx)
+	members, err := s.next.ListMembers(ctx, groupID)
+	if err != nil {
+		s.logger.Warn("listing group members for invalidation failed; relying on TTL", "group_id", groupID, "error", err)
+		return nil
+	}
+	keys := make([]string, 0, len(members))
+	for _, m := range members {
+		keys = append(keys, userPermissionsKey(m.ID))
+	}
+	if len(keys) > 0 {
+		s.invalidate(ctx, keys...)
+	}
+	return nil
 }

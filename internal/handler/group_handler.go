@@ -25,9 +25,8 @@ func (h *GroupHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/groups/{id}", h.Update)
 	mux.HandleFunc("DELETE /api/v1/groups/{id}", h.Delete)
 	mux.HandleFunc("GET /api/v1/groups/{id}/users", h.ListMembers)
-	mux.HandleFunc("GET /api/v1/groups/{id}/permissions", h.GetPermissions)
-	mux.HandleFunc("PUT /api/v1/groups/{id}/permissions", h.SetPermissions)
-	mux.HandleFunc("GET /api/v1/permissions", h.ListPermissions)
+	mux.HandleFunc("GET /api/v1/groups/{id}/roles", h.GetRoles)
+	mux.HandleFunc("PUT /api/v1/groups/{id}/roles", h.SetRoles)
 }
 
 type groupRequest struct {
@@ -38,24 +37,20 @@ type groupRequest struct {
 type createGroupRequest struct {
 	OrganisationID int64  `json:"organisation_id" example:"1"`
 	Name           string `json:"name" example:"editors"`
-	// Permissions are keys from GET /permissions. Leave the field out to give
-	// the group the same permissions as the built-in member group.
-	Permissions []string `json:"permissions,omitempty" example:"record:read:org"`
+	// RoleIDs are IDs from GET /roles. Leave the field out for a group with no
+	// roles.
+	RoleIDs []int64 `json:"role_ids,omitempty" example:"4"`
 }
 
-type groupPermissionsRequest struct {
-	Permissions []string `json:"permissions" example:"record:read:org,user:read"`
-}
-
-type groupPermissionsResponse struct {
-	Permissions []string `json:"permissions" example:"record:read:org,user:read"`
+type setRolesRequest struct {
+	RoleIDs []int64 `json:"role_ids" example:"4,5"`
 }
 
 const invalidGroupID = "invalid group ID"
 
 // Create godoc
 // @Summary     Create a group in an organisation
-// @Description Needs group:create. Returns the new group, including its ID. Names are lower-cased, must start with a letter, and are unique within the organisation. permissions (keys from GET /permissions) choose what the group may do and need group:manage_permissions; without it the group gets the member permissions.
+// @Description Needs group:create. Returns the new group, including its ID. Names are lower-cased, must start with a letter, and are unique within the organisation. role_ids (IDs from GET /roles) give the group its roles and need role:assign; without them the group has none, and its members only get what their own roles allow.
 // @Tags        groups
 // @Accept      json
 // @Produce     json
@@ -75,7 +70,7 @@ func (h *GroupHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	group, err := h.service.Create(r.Context(),
-		domain.Group{OrganisationID: req.OrganisationID, Name: req.Name}, req.Permissions)
+		domain.Group{OrganisationID: req.OrganisationID, Name: req.Name}, req.RoleIDs)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -223,88 +218,68 @@ func (h *GroupHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	util.JSON(w, http.StatusOK, members)
 }
 
-// GetPermissions godoc
-// @Summary     List what a group may do
-// @Description Needs group:read. Returns the permission keys of the group.
+// GetRoles godoc
+// @Summary     List the roles of a group
+// @Description Needs group:read. Every member of the group gets what these roles allow, on top of their own roles.
 // @Tags        groups
 // @Produce     json
 // @Param       id  path     int true "Group ID"
-// @Success     200 {object} groupPermissionsResponse
+// @Success     200 {array}  domain.Role
 // @Failure     400 {object} util.ErrorResponse
 // @Failure     403 {object} util.ErrorResponse
 // @Failure     404 {object} util.ErrorResponse
 // @Failure     500 {object} util.ErrorResponse
-// @Router      /groups/{id}/permissions [get]
-func (h *GroupHandler) GetPermissions(w http.ResponseWriter, r *http.Request) {
+// @Router      /groups/{id}/roles [get]
+func (h *GroupHandler) GetRoles(w http.ResponseWriter, r *http.Request) {
 	id, ok := parsePathID(w, r, invalidGroupID)
 	if !ok {
 		return
 	}
 
-	permissions, err := h.service.GetPermissions(r.Context(), id)
+	roles, err := h.service.GetRoles(r.Context(), id)
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
 
-	util.JSON(w, http.StatusOK, groupPermissionsResponse{Permissions: permissions})
+	util.JSON(w, http.StatusOK, roles)
 }
 
-// SetPermissions godoc
-// @Summary     Change what a group may do
-// @Description Needs group:manage_permissions. Replaces the group's permissions with the given keys from GET /permissions (400 for an unknown key). The built-in admin and member groups cannot be changed (400). Takes effect on the group's members' next request.
+// SetRoles godoc
+// @Summary     Change the roles of a group
+// @Description Needs role:assign. Replaces the group's roles with the given role IDs (404 for a role that does not exist in the organisation). You can only add or remove roles whose permissions you hold yourself (403 otherwise). Takes effect for the members on their next request.
 // @Tags        groups
 // @Accept      json
 // @Produce     json
-// @Param       id   path     int                     true "Group ID"
-// @Param       body body     groupPermissionsRequest true "New permissions"
-// @Success     200  {object} groupPermissionsResponse
+// @Param       id   path     int               true "Group ID"
+// @Param       body body     setRolesRequest   true "New roles"
+// @Success     200  {array}  domain.Role
 // @Failure     400  {object} util.ErrorResponse
 // @Failure     403  {object} util.ErrorResponse
 // @Failure     404  {object} util.ErrorResponse
 // @Failure     500  {object} util.ErrorResponse
-// @Router      /groups/{id}/permissions [put]
-func (h *GroupHandler) SetPermissions(w http.ResponseWriter, r *http.Request) {
+// @Router      /groups/{id}/roles [put]
+func (h *GroupHandler) SetRoles(w http.ResponseWriter, r *http.Request) {
 	id, ok := parsePathID(w, r, invalidGroupID)
 	if !ok {
 		return
 	}
 
-	var req groupPermissionsRequest
+	var req setRolesRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		util.Error(w, http.StatusBadRequest, "invalid JSON request")
 		return
 	}
-	if req.Permissions == nil {
-		util.Error(w, http.StatusBadRequest, "permissions is required (use [] for none)")
+	if req.RoleIDs == nil {
+		util.Error(w, http.StatusBadRequest, "role_ids is required (use [] for none)")
 		return
 	}
 
-	permissions, err := h.service.SetPermissions(r.Context(), id, req.Permissions)
+	roles, err := h.service.SetRoles(r.Context(), id, req.RoleIDs)
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
 
-	util.JSON(w, http.StatusOK, groupPermissionsResponse{Permissions: permissions})
-}
-
-// ListPermissions godoc
-// @Summary     List every permission
-// @Description Needs group:manage_permissions, so only admins see it. Returns the permissions a group can be given, with a description and the resource they belong to.
-// @Tags        groups
-// @Produce     json
-// @Success     200 {array}  domain.Permission
-// @Failure     403 {object} util.ErrorResponse
-// @Failure     404 {object} util.ErrorResponse
-// @Failure     500 {object} util.ErrorResponse
-// @Router      /permissions [get]
-func (h *GroupHandler) ListPermissions(w http.ResponseWriter, r *http.Request) {
-	permissions, err := h.service.ListPermissions(r.Context())
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-
-	util.JSON(w, http.StatusOK, permissions)
+	util.JSON(w, http.StatusOK, roles)
 }

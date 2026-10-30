@@ -40,6 +40,9 @@ func (s *OrganisationService) Create(ctx context.Context, o domain.Organisation,
 	if err := admin.Validate(); err != nil {
 		return domain.Organisation{}, domain.User{}, err
 	}
+	if err := admin.SetPassword(admin.Password); err != nil {
+		return domain.Organisation{}, domain.User{}, err
+	}
 
 	admin.SignupMethod = domain.SignupMethodEmail
 

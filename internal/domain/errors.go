@@ -20,7 +20,14 @@ var (
 	ErrGroupInUse     = errors.New("group still has users")
 
 	ErrGroupNotInOrganisation = errors.New("group does not belong to the user's organisation")
-	ErrBuiltinGroup           = errors.New("built-in groups (admin, member) cannot be renamed, deleted or given other permissions")
+
+	ErrInvalidRole   = errors.New("invalid role")
+	ErrInvalidRoleID = errors.New("invalid role ID")
+	ErrRoleNotFound  = errors.New("role not found")
+	ErrRoleExists    = errors.New("role already exists")
+	ErrRoleInUse     = errors.New("role is still assigned to users or groups")
+	ErrBuiltinRole   = errors.New("built-in roles (owner, admin, member, guest) cannot be renamed, changed or deleted")
+	ErrLastOwner     = errors.New("an organisation must keep at least one owner")
 
 	ErrInvalidOrganisation   = errors.New("invalid organisation")
 	ErrInvalidOrganisationID = errors.New("invalid organisation ID")
@@ -29,7 +36,7 @@ var (
 	ErrOrganisationInUse     = errors.New("organisation still has groups with users")
 
 	// Authentication and authorization.
-	ErrInvalidCredentials = errors.New("invalid email")
+	ErrInvalidCredentials = errors.New("invalid email or password")
 	ErrWrongSignupMethod  = errors.New("wrong sign-in method")
 	ErrTooManyAttempts    = errors.New("too many failed login attempts, try again later")
 	ErrUnauthenticated    = errors.New("authentication required")

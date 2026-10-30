@@ -34,12 +34,39 @@ func scanOrganisation(row interface{ Scan(...any) error }) (domain.Organisation,
 	return o, err
 }
 
-// Create inserts the organisation with its admin and member groups and its
-// first admin user (admin.Name, admin.Email, admin.SignupMethod, placed in the
-// admin group), all in one transaction so nothing is left behind when a step
-// fails. It returns domain.ErrOrganisationExists for a duplicate name and
-// domain.ErrEmailTaken when the admin's email already belongs to a user (the
-// unique constraint decides, so there is no check-then-insert race).
+// builtinRoles lists the four roles every organisation gets and what each one
+// allows: owner has every permission in the permissions table, admin all but
+// deleting the organisation.
+var builtinRoles = []struct {
+	name        string
+	permissions func(ctx context.Context, q execer, roleID int64) error
+}{
+	{domain.OwnerRoleName, func(ctx context.Context, q execer, roleID int64) error {
+		_, err := q.ExecContext(ctx,
+			`INSERT INTO role_permissions (role_id, permission_key) SELECT $1, key FROM permissions`, roleID)
+		return err
+	}},
+	{domain.AdminRoleName, func(ctx context.Context, q execer, roleID int64) error {
+		_, err := q.ExecContext(ctx,
+			`INSERT INTO role_permissions (role_id, permission_key) SELECT $1, key FROM permissions WHERE key <> $2`,
+			roleID, domain.PermOrganisationErase)
+		return err
+	}},
+	{domain.MemberRoleName, func(ctx context.Context, q execer, roleID int64) error {
+		return insertRolePermissions(ctx, q, roleID, domain.MemberPermissions())
+	}},
+	{domain.GuestRoleName, func(ctx context.Context, q execer, roleID int64) error {
+		return insertRolePermissions(ctx, q, roleID, domain.GuestPermissions())
+	}},
+}
+
+// Create inserts the organisation with its four built-in roles (owner, admin,
+// member, guest) and its first user (admin.Name, admin.Email,
+// admin.SignupMethod), who gets the owner role, all in one transaction so
+// nothing is left behind when a step fails. It returns
+// domain.ErrOrganisationExists for a duplicate name and domain.ErrEmailTaken
+// when the owner's email already belongs to a user (the unique constraint
+// decides, so there is no check-then-insert race).
 func (r *OrganisationRepository) Create(ctx context.Context, o domain.Organisation, admin domain.User) (domain.Organisation, domain.User, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -54,34 +81,31 @@ func (r *OrganisationRepository) Create(ctx context.Context, o domain.Organisati
 		return domain.Organisation{}, domain.User{}, err
 	}
 
-	// The two built-in groups: admin gets every permission in the table,
-	// member the fixed member set.
-	var adminGroupID int64
-	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO groups (organisation_id, name) VALUES ($1, $2) RETURNING id`,
-		o.ID, domain.AdminGroupName).Scan(&adminGroupID); err != nil {
-		return domain.Organisation{}, domain.User{}, err
-	}
-	if err := insertAllPermissions(ctx, tx, adminGroupID); err != nil {
-		return domain.Organisation{}, domain.User{}, err
-	}
-
-	var memberGroupID int64
-	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO groups (organisation_id, name) VALUES ($1, $2) RETURNING id`,
-		o.ID, domain.MemberGroupName).Scan(&memberGroupID); err != nil {
-		return domain.Organisation{}, domain.User{}, err
-	}
-	if err := insertGroupPermissions(ctx, tx, memberGroupID, domain.MemberPermissions()); err != nil {
-		return domain.Organisation{}, domain.User{}, err
+	var ownerRoleID int64
+	for _, br := range builtinRoles {
+		var roleID int64
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO roles (organisation_id, name) VALUES ($1, $2) RETURNING id`,
+			o.ID, br.name).Scan(&roleID); err != nil {
+			return domain.Organisation{}, domain.User{}, err
+		}
+		if err := br.permissions(ctx, tx, roleID); err != nil {
+			return domain.Organisation{}, domain.User{}, err
+		}
+		if br.name == domain.OwnerRoleName {
+			ownerRoleID = roleID
+		}
 	}
 
 	created, err := scanUser(tx.QueryRowContext(ctx,
-		`INSERT INTO users (name, email, signup_method, group_id, organisation_id)
+		`INSERT INTO users (name, email, signup_method, organisation_id, password_hash)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING `+userColumns,
-		admin.Name, admin.Email, admin.SignupMethod, adminGroupID, o.ID))
+		admin.Name, admin.Email, admin.SignupMethod, o.ID, admin.PasswordHash))
 	if err != nil {
+		return domain.Organisation{}, domain.User{}, err
+	}
+	if err := insertUserRoles(ctx, tx, created.ID, o.ID, []int64{ownerRoleID}); err != nil {
 		return domain.Organisation{}, domain.User{}, err
 	}
 

@@ -18,10 +18,14 @@ func (u users) GetByID(_ context.Context, id int64) (domain.User, error) {
 	return domain.User{}, domain.ErrUserNotFound
 }
 
-type perms map[int64][]string
+// perms resolves a user's permissions through their group, like the real store.
+type perms struct {
+	users  users
+	groups map[int64][]string
+}
 
-func (p perms) Permissions(_ context.Context, groupID int64) ([]string, error) {
-	return p[groupID], nil
+func (p perms) Permissions(_ context.Context, userID int64) ([]string, error) {
+	return p.groups[p.users[userID].GroupID], nil
 }
 
 // Org 1: user 1 admin (group 100), user 2 member (101), user 3 auditor (102).
@@ -34,21 +38,22 @@ var (
 		10: {ID: 10, OrganisationID: 2, GroupID: 200},
 		20: {ID: 20},
 	}
-	groups = perms{
+	groups = map[int64][]string{
 		100: allPermissions,
 		101: domain.MemberPermissions(),
 		102: {"record:read:org"},
 		200: allPermissions,
 	}
-	az = New(directory, groups)
+	az = New(directory, perms{directory, groups})
 )
 
-// allPermissions is what an admin group holds: every row migration 011 seeds.
+// allPermissions is what an admin group holds: every permission the migrations seed.
 var allPermissions = []string{
 	"record:create:own", "record:create:org", "record:read:own", "record:read:org",
 	"record:update:own", "record:update:org", "record:delete:own", "record:delete:org",
 	"user:read", "user:update:own", "user:update:org", "user:delete", "user:assign_group",
-	"group:create", "group:read", "group:update", "group:delete", "group:manage_permissions",
+	"group:create", "group:read", "group:update", "group:delete",
+	"role:create", "role:read", "role:update", "role:delete", "role:assign",
 	"organisation:read", "organisation:update", "organisation:delete",
 }
 
@@ -170,10 +175,10 @@ func TestRequireSelfOr(t *testing.T) {
 }
 
 func TestHas(t *testing.T) {
-	if ok, err := az.Has(as(1), domain.PermGroupManagePerms); err != nil || !ok {
+	if ok, err := az.Has(as(1), domain.PermRoleAssign); err != nil || !ok {
 		t.Fatalf("admin: %v, %v", ok, err)
 	}
-	if ok, err := az.Has(as(2), domain.PermGroupManagePerms); err != nil || ok {
+	if ok, err := az.Has(as(2), domain.PermRoleAssign); err != nil || ok {
 		t.Fatalf("member: %v, %v", ok, err)
 	}
 	if ok, err := az.Has(as(20), domain.PermGroupRead); err != nil || ok {

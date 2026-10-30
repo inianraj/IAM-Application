@@ -17,7 +17,7 @@ const docTemplate = `{
     "paths": {
         "/auth/login": {
             "post": {
-                "description": "There is no password: knowing the email of a user created with POST /auth/users is enough (development only, no proof of ownership). On success, sets an HttpOnly \"session\" cookie (SameSite=Strict) that the browser sends on later requests, and returns the user. Accounts can only sign in with the method they were created with (403 for google/github accounts). An unknown email returns 401. After 5 failed attempts per email and IP, 429 for 15 minutes.",
+                "description": "Checks the email and password; a wrong password and an unknown email both return 401 \"invalid email or password\". On success, sets an HttpOnly \"session\" cookie (SameSite=Strict) that the browser sends on later requests, and returns the user. Accounts can only sign in with the method they were created with (403 for google/github accounts). After 5 failed attempts per email and IP, 429 for 15 minutes.",
                 "consumes": [
                     "application/json"
                 ],
@@ -27,10 +27,10 @@ const docTemplate = `{
                 "tags": [
                     "auth"
                 ],
-                "summary": "Sign in with an email",
+                "summary": "Sign in with an email and password",
                 "parameters": [
                     {
-                        "description": "Email",
+                        "description": "Email and password",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -107,7 +107,7 @@ const docTemplate = `{
         },
         "/auth/organisations": {
             "post": {
-                "description": "Needs no session. Creates the organisation (name unique, ignoring case) with an \"admin\" and a \"member\" group, and its first admin user from admin_name and admin_email, in one step: the email must not be registered yet (409), and nothing is created if any part fails. Personal email providers (gmail, yahoo, ...) are rejected. The admin signs in with POST /auth/login.",
+                "description": "Needs no session. Creates the organisation (name unique, ignoring case) with its four built-in roles (owner, admin, member, guest) and its first user from admin_name, admin_email and admin_password (8 to 72 bytes), who gets the owner role, in one step: the email must not be registered yet (409), and nothing is created if any part fails. Personal email providers (gmail, yahoo, ...) are rejected. The owner signs in with POST /auth/login using the email and password.",
                 "consumes": [
                     "application/json"
                 ],
@@ -159,7 +159,7 @@ const docTemplate = `{
         },
         "/auth/users": {
             "post": {
-                "description": "Needs no session. organisation_id is required: the user gets the basic \"member\" role in that organisation (404 if it doesn't exist). Returns the created user. There is no password; the user signs in with POST /auth/login using the email. Personal email providers (gmail, yahoo, ...) are rejected.",
+                "description": "Requires a session and the user:assign_group permission (admins). The user is added to your own organisation with the member role (or the role_ids you give, which needs role:assign and permissions you hold yourself) and no group; there is no way to join an organisation without an admin. Returns the created user. A password is required (8 to 72 bytes); the user signs in with POST /auth/login using the email and password. Personal email providers (gmail, yahoo, ...) are rejected.",
                 "consumes": [
                     "application/json"
                 ],
@@ -190,6 +190,18 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
                         }
@@ -265,7 +277,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Returns the new group, including its ID. Names are lower-cased, must start with a letter, and are unique within the organisation.",
+                "description": "Needs group:create. Returns the new group, including its ID. Names are lower-cased, must start with a letter, and are unique within the organisation. role_ids (IDs from GET /roles) give the group its roles and need role:assign; without them the group has none, and its members only get what their own roles allow.",
                 "consumes": [
                     "application/json"
                 ],
@@ -283,7 +295,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/handler.groupRequest"
+                            "$ref": "#/definitions/handler.createGroupRequest"
                         }
                     }
                 ],
@@ -296,6 +308,12 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
                         }
@@ -462,6 +480,128 @@ const docTemplate = `{
                     },
                     "409": {
                         "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/groups/{id}/roles": {
+            "get": {
+                "description": "Needs group:read. Every member of the group gets what these roles allow, on top of their own roles.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "List the roles of a group",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Group ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Role"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Needs role:assign. Replaces the group's roles with the given role IDs (404 for a role that does not exist in the organisation). You can only add or remove roles whose permissions you hold yourself (403 otherwise). Takes effect for the members on their next request.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "groups"
+                ],
+                "summary": "Change the roles of a group",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Group ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "New roles",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.setRolesRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Role"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
                         }
@@ -721,23 +861,72 @@ const docTemplate = `{
                 }
             }
         },
+        "/permissions": {
+            "get": {
+                "description": "Needs role:read. Returns the permissions a role can be given, with a description and the resource they belong to.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "roles"
+                ],
+                "summary": "List every permission",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Permission"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/records": {
             "get": {
-                "description": "Returns only the records that belong to the given user (an empty list if they have none).",
+                "description": "With user_id: that user's records (record:read:own for yourself, record:read:org for others). With scope=org: every record of your organisation (needs record:read:org). With neither: your own records. An empty list if there are none.",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "records"
                 ],
-                "summary": "List the records of a user",
+                "summary": "List records",
                 "parameters": [
                     {
                         "type": "integer",
                         "description": "User ID",
                         "name": "user_id",
-                        "in": "query",
-                        "required": true
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "org"
+                        ],
+                        "type": "string",
+                        "description": "Use org for every record of your organisation",
+                        "name": "scope",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -752,6 +941,12 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/util.ErrorResponse"
                         }
@@ -964,6 +1159,439 @@ const docTemplate = `{
                 }
             }
         },
+        "/roles": {
+            "get": {
+                "description": "Needs role:read. Includes the four built-in roles (owner, admin, member, guest).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "roles"
+                ],
+                "summary": "List the roles of your organisation",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Role"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Needs role:create. Creates a role in your own organisation. permissions (keys from GET /permissions) are what the role allows; you can only give permissions you hold yourself (403 otherwise, 400 for an unknown key). Names are lower-cased, must start with a letter, and are unique within the organisation (409).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "roles"
+                ],
+                "summary": "Create a role",
+                "parameters": [
+                    {
+                        "description": "Role to create",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.createRoleRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Role"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/roles/{id}": {
+            "get": {
+                "description": "Needs role:read.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "roles"
+                ],
+                "summary": "Get a role by ID",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Role ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Role"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Needs role:update. The built-in roles cannot be renamed (400).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "roles"
+                ],
+                "summary": "Rename a role",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Role ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "New name",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.updateRoleRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Role"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Needs role:delete. Fails with 409 while a user or group still has the role, and the built-in roles cannot be deleted (400).",
+                "tags": [
+                    "roles"
+                ],
+                "summary": "Delete a role",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Role ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/roles/{id}/permissions": {
+            "get": {
+                "description": "Needs role:read. Returns the permission keys of the role.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "roles"
+                ],
+                "summary": "List what a role allows",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Role ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/handler.rolePermissionsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Needs role:update. Replaces the role's permissions with the given keys from GET /permissions (400 for an unknown key). You can only add or remove permissions you hold yourself (403 otherwise), and the built-in roles cannot be changed (400). Takes effect for everyone who has the role on their next request.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "roles"
+                ],
+                "summary": "Change what a role allows",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Role ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "New permissions",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.rolePermissionsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/handler.rolePermissionsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/users": {
+            "get": {
+                "description": "Needs user:read. Returns every user of your own organisation, oldest first, including those without a group.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "List the users of your organisation",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.User"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/users/{id}": {
             "get": {
                 "produces": [
@@ -1010,7 +1638,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "Changes the name and email (work email only). The group is changed with the assign-group endpoint.",
+                "description": "Changes the name only: the email is the login identity and cannot be changed (an email field is rejected). Needs user:update:own for yourself, user:update:org for others. The group is changed with the assign-group endpoint and the roles with the roles endpoint.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1120,7 +1748,7 @@ const docTemplate = `{
         },
         "/users/{id}/group": {
             "put": {
-                "description": "The group must exist (404) and belong to the organisation stored on the user (400 otherwise).",
+                "description": "Needs user:assign_group. The group must exist (404) and belong to the organisation stored on the user (400 otherwise). A group_id of 0 takes the user out of their group. The user gets the roles of the new group and loses those of the old one, so you must hold the permissions of every role that changes (403 otherwise).",
                 "consumes": [
                     "application/json"
                 ],
@@ -1176,6 +1804,187 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/users/{id}/permissions": {
+            "get": {
+                "description": "Needs role:read, except for yourself. Returns every permission the user has: the union of their own roles and the roles of their group.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "List what a user may do",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/handler.userPermissionsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/users/{id}/roles": {
+            "get": {
+                "description": "Needs role:read, except for yourself. These are the roles given to the user themselves; the roles their group gives are listed under GET /groups/{id}/roles.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "List the roles a user holds directly",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Role"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Needs role:assign. Replaces the roles the user holds directly with the given role IDs (404 for a role that does not exist in the organisation). You can only add or remove roles whose permissions you hold yourself (403 otherwise), so only an owner can give or take the owner role, and an organisation always keeps at least one owner (409). Takes effect on the user's next request.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Change the roles of a user",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "User ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "New roles",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.setRolesRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Role"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/util.ErrorResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -1199,6 +2008,9 @@ const docTemplate = `{
                 "email": {
                     "type": "string"
                 },
+                "id": {
+                    "type": "integer"
+                },
                 "name": {
                     "type": "string"
                 }
@@ -1215,6 +2027,45 @@ const docTemplate = `{
                 }
             }
         },
+        "domain.Permission": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "example": "read"
+                },
+                "description": {
+                    "type": "string",
+                    "example": "Read your own records"
+                },
+                "key": {
+                    "type": "string",
+                    "example": "record:read:own"
+                },
+                "resource": {
+                    "type": "string",
+                    "example": "record"
+                },
+                "scope": {
+                    "type": "string",
+                    "example": "own"
+                }
+            }
+        },
+        "domain.Role": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "organisation_id": {
+                    "type": "integer"
+                }
+            }
+        },
         "domain.Task": {
             "type": "object",
             "properties": {
@@ -1225,6 +2076,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "id": {
+                    "type": "integer"
+                },
+                "organisation_id": {
+                    "description": "OrganisationID is the owner's organisation, stored with the record so\norganisation-wide permissions can be checked without loading the owner.\nIt is 0 (omitted) for records of legacy users without an organisation.",
                     "type": "integer"
                 },
                 "title": {
@@ -1292,6 +2147,29 @@ const docTemplate = `{
                 }
             }
         },
+        "handler.createGroupRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "example": "editors"
+                },
+                "organisation_id": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "role_ids": {
+                    "description": "RoleIDs are IDs from GET /roles. Leave the field out for a group with no\nroles.",
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    },
+                    "example": [
+                        4
+                    ]
+                }
+            }
+        },
         "handler.createOrganisationRequest": {
             "type": "object",
             "properties": {
@@ -1302,6 +2180,11 @@ const docTemplate = `{
                 "admin_name": {
                     "type": "string",
                     "example": "Alice"
+                },
+                "admin_password": {
+                    "description": "AdminPassword is the owner's password (8 to 72 bytes).",
+                    "type": "string",
+                    "example": "s3cret-pass"
                 },
                 "name": {
                     "type": "string",
@@ -1324,6 +2207,25 @@ const docTemplate = `{
                 }
             }
         },
+        "handler.createRoleRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "example": "developer"
+                },
+                "permissions": {
+                    "description": "Permissions are keys from GET /permissions. Leave the field out for a\nrole with none.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "record:read:org"
+                    ]
+                }
+            }
+        },
         "handler.createUserRequest": {
             "type": "object",
             "properties": {
@@ -1335,9 +2237,19 @@ const docTemplate = `{
                     "type": "string",
                     "example": "Alice"
                 },
-                "organisation_id": {
-                    "type": "integer",
-                    "example": 1
+                "password": {
+                    "type": "string",
+                    "example": "s3cret-pass"
+                },
+                "role_ids": {
+                    "description": "RoleIDs are IDs from GET /roles. Leave the field out to give the user the\nmember role.",
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    },
+                    "example": [
+                        4
+                    ]
                 }
             }
         },
@@ -1369,6 +2281,10 @@ const docTemplate = `{
                 "email": {
                     "type": "string",
                     "example": "alice@company.com"
+                },
+                "password": {
+                    "type": "string",
+                    "example": "s3cret-pass"
                 }
             }
         },
@@ -1408,16 +2324,81 @@ const docTemplate = `{
                 }
             }
         },
+        "handler.rolePermissionsRequest": {
+            "type": "object",
+            "properties": {
+                "permissions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "record:read:org",
+                        "user:read"
+                    ]
+                }
+            }
+        },
+        "handler.rolePermissionsResponse": {
+            "type": "object",
+            "properties": {
+                "permissions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "record:read:org",
+                        "user:read"
+                    ]
+                }
+            }
+        },
+        "handler.setRolesRequest": {
+            "type": "object",
+            "properties": {
+                "role_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    },
+                    "example": [
+                        4,
+                        5
+                    ]
+                }
+            }
+        },
+        "handler.updateRoleRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "example": "developer"
+                }
+            }
+        },
         "handler.updateUserRequest": {
             "type": "object",
             "properties": {
-                "email": {
-                    "type": "string",
-                    "example": "alice@company.com"
-                },
                 "name": {
                     "type": "string",
                     "example": "Alice"
+                }
+            }
+        },
+        "handler.userPermissionsResponse": {
+            "type": "object",
+            "properties": {
+                "permissions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "record:read:own",
+                        "user:read"
+                    ]
                 }
             }
         },

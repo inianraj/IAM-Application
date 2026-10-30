@@ -12,7 +12,7 @@ import (
 // authorization_test.go).
 
 func TestUserWithoutOrganisationCanReadOnlyThemselves(t *testing.T) {
-	svc := NewUserService(userDirStore{}, az)
+	svc := newUserService(&userDirStore{})
 
 	tests := []struct {
 		name    string
@@ -85,7 +85,7 @@ func (a *adminOrgStore) Create(_ context.Context, o domain.Organisation, admin d
 func TestCreateOrganisationCreatesItsAdmin(t *testing.T) {
 	ctx := context.Background()
 	acme := domain.Organisation{Name: "Acme"}
-	alice := domain.User{Name: " Alice ", Email: " Alice@Acme.com "}
+	alice := domain.User{Name: " Alice ", Email: " Alice@Acme.com ", Password: "alice-pass-1"}
 
 	t.Run("passes a normalized email-method admin to the store", func(t *testing.T) {
 		store := &adminOrgStore{}

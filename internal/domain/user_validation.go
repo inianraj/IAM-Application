@@ -46,6 +46,21 @@ func (u *User) Validate() error {
 	return validateWorkEmail(u.Email)
 }
 
+// SetPassword validates the plain password and stores its hash in
+// PasswordHash. The plain Password is cleared so it is not kept around.
+func (u *User) SetPassword(password string) error {
+	if err := ValidatePassword(password); err != nil {
+		return err
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return err
+	}
+	u.PasswordHash = hash
+	u.Password = ""
+	return nil
+}
+
 // ValidateName trims and checks the name only. Updating a user changes the
 // name and never the email, which is the login identity.
 func (u *User) ValidateName() error {

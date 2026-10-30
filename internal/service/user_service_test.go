@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"crud/internal/domain"
@@ -13,7 +14,7 @@ type fakeUserStore struct {
 	err     error
 }
 
-func (f *fakeUserStore) Create(_ context.Context, u domain.User) (domain.User, error) {
+func (f *fakeUserStore) Create(_ context.Context, u domain.User, _ []int64) (domain.User, error) {
 	if f.err != nil {
 		return domain.User{}, f.err
 	}
@@ -24,17 +25,23 @@ func (f *fakeUserStore) Create(_ context.Context, u domain.User) (domain.User, e
 func (f *fakeUserStore) GetByID(context.Context, int64) (domain.User, error) {
 	return domain.User{}, nil
 }
+func (f *fakeUserStore) ListByOrganisation(context.Context, int64) ([]domain.User, error) {
+	return nil, nil
+}
 func (f *fakeUserStore) Update(_ context.Context, u domain.User) (domain.User, error) { return u, nil }
 func (f *fakeUserStore) Delete(context.Context, int64) error                          { return nil }
 func (f *fakeUserStore) AssignGroup(context.Context, int64, int64) error              { return nil }
+func (f *fakeUserStore) Permissions(context.Context, int64) ([]string, error)         { return nil, nil }
+func (f *fakeUserStore) Roles(context.Context, int64) ([]domain.Role, error)          { return nil, nil }
+func (f *fakeUserStore) SetRoles(context.Context, int64, []int64) error               { return nil }
 
 // Users are added by an admin: the new user joins the caller's own
 // organisation as a member, with a normalized email and no password.
 func TestCreateAddsAMemberToTheCallersOrganisation(t *testing.T) {
 	store := &fakeUserStore{}
-	svc := NewUserService(store, az)
+	svc := newUserService(store)
 
-	u, err := svc.Create(as(1), domain.User{Name: " Ann ", Email: "Ann@Corp.com"})
+	u, err := svc.Create(as(1), domain.User{Name: " Ann ", Email: "Ann@Corp.com", Password: "ann-pass-123"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +55,9 @@ func TestCreateAddsAMemberToTheCallersOrganisation(t *testing.T) {
 	}
 	if got.OrganisationID != 1 {
 		t.Fatalf("organisation = %d, want the caller's (1)", got.OrganisationID)
+	}
+	if got.Password != "" || !domain.CheckPassword(got.PasswordHash, "ann-pass-123") {
+		t.Fatalf("the store must get a hash of the password and no plain text: %+v", got)
 	}
 }
 
@@ -72,7 +82,7 @@ func TestCreateNeedsALoginAndThePermission(t *testing.T) {
 				ctx = as(tt.caller)
 			}
 
-			_, err := NewUserService(store, az).Create(ctx, domain.User{Name: "Ann", Email: "ann@corp.com"})
+			_, err := newUserService(store).Create(ctx, domain.User{Name: "Ann", Email: "ann@corp.com", Password: "ann-pass-123"}, nil)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("got %v, want %v", err, tt.wantErr)
 			}
@@ -91,15 +101,18 @@ func TestCreateRejectsBadInputBeforeTouchingTheStore(t *testing.T) {
 		name string
 		user domain.User
 	}{
-		{"personal email", domain.User{Name: "Ann", Email: "ann@gmail.com"}},
-		{"missing name", domain.User{Email: "ann@corp.com"}},
-		{"missing email", domain.User{Name: "Ann"}},
+		{"personal email", domain.User{Name: "Ann", Email: "ann@gmail.com", Password: "ann-pass-123"}},
+		{"missing name", domain.User{Email: "ann@corp.com", Password: "ann-pass-123"}},
+		{"missing email", domain.User{Name: "Ann", Password: "ann-pass-123"}},
+		{"missing password", domain.User{Name: "Ann", Email: "ann@corp.com"}},
+		{"short password", domain.User{Name: "Ann", Email: "ann@corp.com", Password: "short"}},
+		{"password over 72 bytes", domain.User{Name: "Ann", Email: "ann@corp.com", Password: strings.Repeat("a", 73)}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &fakeUserStore{}
-			_, err := NewUserService(store, az).Create(as(1), tt.user)
+			_, err := newUserService(store).Create(as(1), tt.user, nil)
 			if !errors.Is(err, domain.ErrInvalidUser) {
 				t.Fatalf("expected ErrInvalidUser, got %v", err)
 			}
@@ -112,7 +125,7 @@ func TestCreateRejectsBadInputBeforeTouchingTheStore(t *testing.T) {
 
 func TestCreatePropagatesStoreErrors(t *testing.T) {
 	store := &fakeUserStore{err: domain.ErrEmailTaken}
-	_, err := NewUserService(store, az).Create(as(1), domain.User{Name: "Ann", Email: "ann@corp.com"})
+	_, err := newUserService(store).Create(as(1), domain.User{Name: "Ann", Email: "ann@corp.com", Password: "ann-pass-123"}, nil)
 	if !errors.Is(err, domain.ErrEmailTaken) {
 		t.Fatalf("expected ErrEmailTaken, got %v", err)
 	}

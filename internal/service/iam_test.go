@@ -104,30 +104,43 @@ func TestCreateRecordStampsTheOwnersOrganisation(t *testing.T) {
 	}
 }
 
-// Group permissions: creating without a list gives the member set; choosing
-// permissions needs group:manage_permissions as well as group:create.
-func TestCreateGroupPermissions(t *testing.T) {
+// A group is created with no roles unless some are chosen; choosing roles
+// needs role:assign as well as group:create, and duplicates are dropped.
+func TestCreateGroupRoles(t *testing.T) {
 	store := &groupStore{groups: testGroups}
-	svc := NewGroupService(store, az)
+	svc := NewGroupService(store, &roleStore{}, az)
 
 	if _, err := svc.Create(as(1), domain.Group{OrganisationID: 1, Name: "ops"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.createdWith) != len(domain.MemberPermissions()) {
-		t.Fatalf("default permissions = %v, want the member set", store.createdWith)
+	if len(store.createdWith) != 0 {
+		t.Fatalf("default roles = %v, want none", store.createdWith)
 	}
 
-	if _, err := svc.Create(as(1), domain.Group{OrganisationID: 1, Name: "auditors"}, []string{"user:read", "record:read:org", "user:read"}); err != nil {
+	if _, err := svc.Create(as(1), domain.Group{OrganisationID: 1, Name: "auditors"}, []int64{13, 12, 13}); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.createdWith) != 2 || store.createdWith[0] != "user:read" || store.createdWith[1] != "record:read:org" {
-		t.Fatalf("stored permissions = %v, want duplicates removed in first-seen order", store.createdWith)
+	if len(store.createdWith) != 2 || store.createdWith[0] != 13 || store.createdWith[1] != 12 {
+		t.Fatalf("stored roles = %v, want duplicates removed in first-seen order", store.createdWith)
 	}
+}
 
-	if _, err := svc.Create(as(1), domain.Group{OrganisationID: 1, Name: "none"}, []string{}); err != nil {
-		t.Fatalf("a group with no permissions: %v", err)
+// Roles are what a user may do: the owner role is a direct role of user 1, the
+// group of user 2 gives the member role, and a user holds the union.
+func TestUserPermissionsAreTheUnionOfDirectAndGroupRoles(t *testing.T) {
+	store := &userDirStore{}
+	svc := newUserService(store)
+
+	if _, err := svc.GetPermissions(as(2), 2); err != nil {
+		t.Fatalf("a user reads their own permissions: %v", err)
 	}
-	if len(store.createdWith) != 0 {
-		t.Fatalf("stored permissions = %v, want none", store.createdWith)
+	if _, err := svc.GetPermissions(as(2), 3); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("a member reads a colleague's permissions: %v", err)
+	}
+	if _, err := svc.GetPermissions(as(1), 3); err != nil {
+		t.Fatalf("an owner reads a colleague's permissions: %v", err)
+	}
+	if _, err := svc.GetPermissions(as(1), 10); !errors.Is(err, domain.ErrUserNotFound) {
+		t.Fatalf("another organisation's user: %v", err)
 	}
 }
